@@ -2,7 +2,7 @@
 //  HRIRManager.swift
 //  MacHRIR
 //
-//  Manages HRIR presets and convolution processing
+//  Manages HRIR presets and multi-channel convolution processing
 //
 
 import Foundation
@@ -26,7 +26,14 @@ struct HRIRPreset: Identifiable, Codable, Equatable, Hashable {
     }
 }
 
-/// Manages HRIR presets and convolution processing
+/// Renders a single virtual speaker to binaural output
+struct VirtualSpeakerRenderer {
+    let speaker: VirtualSpeaker
+    let convolverLeftEar: ConvolutionEngine
+    let convolverRightEar: ConvolutionEngine
+}
+
+/// Manages HRIR presets and multi-channel convolution processing
 class HRIRManager: ObservableObject {
 
     // MARK: - Published Properties
@@ -35,26 +42,18 @@ class HRIRManager: ObservableObject {
     @Published var activePreset: HRIRPreset?
     @Published var convolutionEnabled: Bool = false
     @Published var errorMessage: String?
+    @Published var currentInputLayout: InputLayout = .stereo
+    @Published var currentHRIRMap: HRIRChannelMap?
 
     // MARK: - Private Properties
 
-    // Convolvers for Binaural Mixing
-    // LL: Left Input -> Left Ear
-    // LR: Left Input -> Right Ear
-    // RL: Right Input -> Left Ear
-    // RR: Right Input -> Right Ear
-    private var convolverLL: ConvolutionEngine?
-    private var convolverLR: ConvolutionEngine?
-    private var convolverRL: ConvolutionEngine?
-    private var convolverRR: ConvolutionEngine?
+    // Multi-channel rendering: one renderer per input channel
+    private var renderers: [VirtualSpeakerRenderer] = []
     
     private let processingBlockSize: Int = 512
     
-    // Mixing Buffers (Pre-allocated)
-    private var bufferLL: [Float] = []
-    private var bufferLR: [Float] = []
-    private var bufferRL: [Float] = []
-    private var bufferRR: [Float] = []
+    // Temporary buffers for convolution (pre-allocated)
+    private var tempConvolutionBuffer: [Float] = []
 
     private let presetsDirectory: URL
 
@@ -68,11 +67,8 @@ class HRIRManager: ObservableObject {
         // Create directory if it doesn't exist
         try? FileManager.default.createDirectory(at: presetsDirectory, withIntermediateDirectories: true)
         
-        // Pre-allocate mixing buffers
-        bufferLL = [Float](repeating: 0, count: processingBlockSize)
-        bufferLR = [Float](repeating: 0, count: processingBlockSize)
-        bufferRL = [Float](repeating: 0, count: processingBlockSize)
-        bufferRR = [Float](repeating: 0, count: processingBlockSize)
+        // Pre-allocate temp buffer
+        tempConvolutionBuffer = [Float](repeating: 0, count: processingBlockSize)
 
         // Load existing presets
         loadPresets()
@@ -88,7 +84,7 @@ class HRIRManager: ObservableObject {
         let wavData = try WAVLoader.load(from: fileURL)
 
         // Validate
-        guard wavData.channelCount >= 1 else {
+        guard wavData.channelCount >= 2 else {
             throw HRIRError.invalidChannelCount(wavData.channelCount)
         }
 
@@ -140,74 +136,148 @@ class HRIRManager: ObservableObject {
         // Clear active preset if it was removed
         if activePreset?.id == preset.id {
             activePreset = nil
-            convolverLL = nil
-            convolverLR = nil
-            convolverRL = nil
-            convolverRR = nil
+            renderers.removeAll()
         }
 
         savePresets()
     }
 
-    /// Select and load a preset for convolution
+    /// Select and load a preset for convolution with specified input layout
     /// - Parameters:
     ///   - preset: The preset to activate
     ///   - targetSampleRate: The sample rate to resample to
-    func activatePreset(_ preset: HRIRPreset, targetSampleRate: Double) {
+    ///   - inputLayout: The layout of input channels (detected from device)
+    ///   - hrirMap: Optional custom HRIR channel mapping (defaults to interleaved pairs)
+    func activatePreset(
+        _ preset: HRIRPreset,
+        targetSampleRate: Double,
+        inputLayout: InputLayout,
+        hrirMap: HRIRChannelMap? = nil
+    ) {
         do {
             // Load WAV file
             let wavData = try WAVLoader.load(from: preset.fileURL)
 
-            // Extract stereo channels
-            // Assuming standard HRIR: Ch0 = Left Ear, Ch1 = Right Ear (for Left Source)
-            let (leftIR, rightIR) = try WAVLoader.extractStereoChannels(from: wavData)
+            print("[HRIRManager] Activating preset: \(preset.name)")
+            print("[HRIRManager] HRIR channels: \(wavData.channelCount), Input layout: \(inputLayout.name)")
 
-            // Resample if needed
-            let resampledLeft: [Float]
-            let resampledRight: [Float]
+            // Debug: Analyze ALL HRIR channels to understand the file structure
+            func calculateRMS(_ samples: [Float]) -> Float {
+                var sum: Float = 0
+                vDSP_svesq(samples, 1, &sum, vDSP_Length(samples.count))
+                return sqrt(sum / Float(samples.count))
+            }
+            
+            print("[HRIRManager] === HRIR Channel Analysis ===")
+            for (idx, channelData) in wavData.audioData.enumerated() {
+                let rms = calculateRMS(channelData)
+                let peak = channelData.map { abs($0) }.max() ?? 0
+                print("[HRIRManager]   Ch[\(idx)]: RMS=\(String(format: "%.6f", rms)) Peak=\(String(format: "%.6f", peak))")
+            }
+            print("[HRIRManager] ================================")
 
-            if abs(wavData.sampleRate - targetSampleRate) > 0.01 {
-                resampledLeft = Resampler.resampleHighQuality(
-                    input: leftIR,
-                    fromRate: wavData.sampleRate,
-                    toRate: targetSampleRate
-                )
-                resampledRight = Resampler.resampleHighQuality(
-                    input: rightIR,
-                    fromRate: wavData.sampleRate,
-                    toRate: targetSampleRate
-                )
+            // Determine HRIR mapping
+            let channelMap: HRIRChannelMap
+            if let customMap = hrirMap {
+                channelMap = customMap
             } else {
-                resampledLeft = leftIR
-                resampledRight = rightIR
+                // Auto-detect mapping format based on channel count
+                // Assume interleaved pairs by default
+                let speakerCount = wavData.channelCount / 2
+                let speakers = inputLayout.channels.prefix(speakerCount)
+                channelMap = HRIRChannelMap.interleavedPairs(speakers: Array(speakers))
+                print("[HRIRManager] Auto-detected interleaved pair mapping for \(speakerCount) speakers")
             }
 
-            // Create convolution engines for Virtual Stereo Speaker setup
-            // Left Speaker Source:
-            // Input L -> Left Ear (Direct): Uses Ch0 (resampledLeft)
-            // Input L -> Right Ear (Cross): Uses Ch1 (resampledRight)
+            // Build renderers for each input channel
+            var newRenderers: [VirtualSpeakerRenderer] = []
             
-            // Right Speaker Source (Symmetric):
-            // Input R -> Left Ear (Cross): Uses Ch1 (resampledRight)
-            // Input R -> Right Ear (Direct): Uses Ch0 (resampledLeft)
+            for (inputIndex, speaker) in inputLayout.channels.enumerated() {
+                // Look up HRIR indices for this speaker
+                guard let (leftEarIdx, rightEarIdx) = channelMap.getIndices(for: speaker) else {
+                    print("[HRIRManager] Warning: No HRIR mapping for \(speaker.displayName), skipping")
+                    continue
+                }
+                
+                // Validate indices
+                guard leftEarIdx < wavData.channelCount && rightEarIdx < wavData.channelCount else {
+                    throw HRIRError.invalidChannelMapping(
+                        "HRIR indices (\(leftEarIdx), \(rightEarIdx)) out of range for \(wavData.channelCount) channels"
+                    )
+                }
+                
+                // Get HRIR data
+                let leftEarIR = wavData.audioData[leftEarIdx]
+                let rightEarIR = wavData.audioData[rightEarIdx]
+                
+                // Debug: Calculate RMS energy to identify channel content
+                func calculateRMS(_ samples: [Float]) -> Float {
+                    var sum: Float = 0
+                    vDSP_svesq(samples, 1, &sum, vDSP_Length(samples.count))
+                    return sqrt(sum / Float(samples.count))
+                }
+                
+                let leftRMS = calculateRMS(leftEarIR)
+                let rightRMS = calculateRMS(rightEarIR)
+                
+                // Debug: Show first few samples and energy
+                let samplePreview = min(8, leftEarIR.count)
+                let leftPreview = leftEarIR.prefix(samplePreview).map { String(format: "%.3f", $0) }.joined(separator: ", ")
+                let rightPreview = rightEarIR.prefix(samplePreview).map { String(format: "%.3f", $0) }.joined(separator: ", ")
+                print("[HRIRManager]   HRIR[\(leftEarIdx)] RMS:\(String(format: "%.6f", leftRMS)) samples: [\(leftPreview)...]")
+                print("[HRIRManager]   HRIR[\(rightEarIdx)] RMS:\(String(format: "%.6f", rightRMS)) samples: [\(rightPreview)...]")
+                
+                // Resample if needed
+                let resampledLeft: [Float]
+                let resampledRight: [Float]
+                
+                if abs(wavData.sampleRate - targetSampleRate) > 0.01 {
+                    resampledLeft = Resampler.resampleHighQuality(
+                        input: leftEarIR,
+                        fromRate: wavData.sampleRate,
+                        toRate: targetSampleRate
+                    )
+                    resampledRight = Resampler.resampleHighQuality(
+                        input: rightEarIR,
+                        fromRate: wavData.sampleRate,
+                        toRate: targetSampleRate
+                    )
+                } else {
+                    resampledLeft = leftEarIR
+                    resampledRight = rightEarIR
+                }
+                
+                // Create convolution engines
+                guard let leftEngine = ConvolutionEngine(hrirSamples: resampledLeft, blockSize: processingBlockSize),
+                      let rightEngine = ConvolutionEngine(hrirSamples: resampledRight, blockSize: processingBlockSize) else {
+                    throw HRIRError.convolutionSetupFailed("Failed to create engines for \(speaker.displayName)")
+                }
+                
+                let renderer = VirtualSpeakerRenderer(
+                    speaker: speaker,
+                    convolverLeftEar: leftEngine,
+                    convolverRightEar: rightEngine
+                )
+                
+                newRenderers.append(renderer)
+                print("[HRIRManager] ✓ Input[\(inputIndex)] '\(speaker.displayName)' → HRIR L:\(leftEarIdx) R:\(rightEarIdx)")
+            }
             
-            guard let engineLL = ConvolutionEngine(hrirSamples: resampledLeft, blockSize: processingBlockSize),
-                  let engineLR = ConvolutionEngine(hrirSamples: resampledRight, blockSize: processingBlockSize),
-                  let engineRL = ConvolutionEngine(hrirSamples: resampledRight, blockSize: processingBlockSize),
-                  let engineRR = ConvolutionEngine(hrirSamples: resampledLeft, blockSize: processingBlockSize) else {
-                throw HRIRError.convolutionSetupFailed("Failed to create convolution engines")
+            guard !newRenderers.isEmpty else {
+                throw HRIRError.convolutionSetupFailed("No valid renderers created")
             }
 
-            // Set engines
-            convolverLL = engineLL
-            convolverLR = engineLR
-            convolverRL = engineRL
-            convolverRR = engineRR
-
+            // Activate
+            renderers = newRenderers
+            
             DispatchQueue.main.async {
                 self.activePreset = preset
+                self.currentInputLayout = inputLayout
+                self.currentHRIRMap = channelMap
                 self.errorMessage = nil
             }
+            
+            print("[HRIRManager] Successfully activated \(newRenderers.count) renderers")
 
         } catch {
             DispatchQueue.main.async {
@@ -216,29 +286,35 @@ class HRIRManager: ObservableObject {
         }
     }
 
-    /// Process audio through convolution
+    /// Process multi-channel audio through convolution
     /// - Parameters:
-    ///   - leftInput: Left channel input samples
-    ///   - rightInput: Right channel input samples
-    ///   - leftOutput: Left channel output buffer
-    ///   - rightOutput: Right channel output buffer
+    ///   - inputs: Array of input channel buffers
+    ///   - leftOutput: Left ear output buffer
+    ///   - rightOutput: Right ear output buffer
     ///   - frameCount: Number of frames to process
     func processAudio(
-        leftInput: [Float],
-        rightInput: [Float],
+        inputs: [[Float]],
         leftOutput: inout [Float],
         rightOutput: inout [Float],
         frameCount: Int
     ) {
-        guard convolutionEnabled,
-              let convLL = convolverLL,
-              let convLR = convolverLR,
-              let convRL = convolverRL,
-              let convRR = convolverRR else {
-            // Passthrough mode - copy input to output
+        guard convolutionEnabled, !renderers.isEmpty else {
+            // Passthrough mode - mix all inputs to stereo
             for i in 0..<frameCount {
-                leftOutput[i] = leftInput[i]
-                rightOutput[i] = rightInput[i]
+                leftOutput[i] = 0
+                rightOutput[i] = 0
+            }
+            
+            // Simple downmix: take first two channels if available
+            if inputs.count >= 1 {
+                for i in 0..<frameCount {
+                    leftOutput[i] = inputs[0][i]
+                }
+            }
+            if inputs.count >= 2 {
+                for i in 0..<frameCount {
+                    rightOutput[i] = inputs[1][i]
+                }
             }
             return
         }
@@ -246,65 +322,64 @@ class HRIRManager: ObservableObject {
         // Process in chunks of processingBlockSize
         var offset = 0
         
-        // Access raw pointers to avoid array slicing allocations
-        leftInput.withUnsafeBufferPointer { leftInPtr in
-            rightInput.withUnsafeBufferPointer { rightInPtr in
-                leftOutput.withUnsafeMutableBufferPointer { leftOutPtr in
-                    rightOutput.withUnsafeMutableBufferPointer { rightOutPtr in
+        // Debug logging (once)
+        struct ProcessLogger {
+            static var hasLogged = false
+        }
+        if !ProcessLogger.hasLogged && !renderers.isEmpty {
+            print("[HRIRManager] Processing \(inputs.count) input channels with \(renderers.count) renderers")
+            for (i, renderer) in renderers.enumerated() {
+                print("[HRIRManager]   Renderer[\(i)]: \(renderer.speaker.displayName)")
+            }
+            ProcessLogger.hasLogged = true
+        }
+        
+        while offset + processingBlockSize <= frameCount {
+            // Clear output accumulators for this block
+            leftOutput.withUnsafeMutableBufferPointer { leftPtr in
+                rightOutput.withUnsafeMutableBufferPointer { rightPtr in
+                    guard let leftBase = leftPtr.baseAddress,
+                          let rightBase = rightPtr.baseAddress else { return }
+                    
+                    let currentLeftOut = leftBase.advanced(by: offset)
+                    let currentRightOut = rightBase.advanced(by: offset)
+                    
+                    // Zero the output for this block
+                    memset(currentLeftOut, 0, processingBlockSize * MemoryLayout<Float>.size)
+                    memset(currentRightOut, 0, processingBlockSize * MemoryLayout<Float>.size)
+                    
+                    // Accumulate contributions from each virtual speaker
+                    for (channelIndex, renderer) in renderers.enumerated() {
+                        guard channelIndex < inputs.count else { continue }
                         
-                        guard let lInBase = leftInPtr.baseAddress,
-                              let rInBase = rightInPtr.baseAddress,
-                              let lOutBase = leftOutPtr.baseAddress,
-                              let rOutBase = rightOutPtr.baseAddress else { return }
-                        
-                        // Use bufferLL/bufferRL etc as scratch buffers for convolution outputs
-                        // We need pointers to them
-                        bufferLL.withUnsafeMutableBufferPointer { bLL in
-                        bufferLR.withUnsafeMutableBufferPointer { bLR in
-                        bufferRL.withUnsafeMutableBufferPointer { bRL in
-                        bufferRR.withUnsafeMutableBufferPointer { bRR in
+                        inputs[channelIndex].withUnsafeBufferPointer { inputPtr in
+                            guard let inputBase = inputPtr.baseAddress else { return }
+                            let currentInput = inputBase.advanced(by: offset)
                             
-                            guard let ptrLL = bLL.baseAddress,
-                                  let ptrLR = bLR.baseAddress,
-                                  let ptrRL = bRL.baseAddress,
-                                  let ptrRR = bRR.baseAddress else { return }
+                            // Convolve and accumulate to left ear
+                            renderer.convolverLeftEar.processAndAccumulate(
+                                input: currentInput,
+                                outputAccumulator: currentLeftOut
+                            )
                             
-                            while offset + processingBlockSize <= frameCount {
-                                let currentLeftIn = lInBase.advanced(by: offset)
-                                let currentRightIn = rInBase.advanced(by: offset)
-                                let currentLeftOut = lOutBase.advanced(by: offset)
-                                let currentRightOut = rOutBase.advanced(by: offset)
-                                
-                                // 1. Perform Convolutions
-                                // L -> L
-                                convLL.process(input: currentLeftIn, output: ptrLL)
-                                // L -> R
-                                convLR.process(input: currentLeftIn, output: ptrLR)
-                                // R -> L
-                                convRL.process(input: currentRightIn, output: ptrRL)
-                                // R -> R
-                                convRR.process(input: currentRightIn, output: ptrRR)
-                                
-                                // 2. Mix Output
-                                // Left Output = LL + RL
-                                vDSP_vadd(ptrLL, 1, ptrRL, 1, currentLeftOut, 1, vDSP_Length(processingBlockSize))
-                                
-                                // Right Output = LR + RR
-                                vDSP_vadd(ptrLR, 1, ptrRR, 1, currentRightOut, 1, vDSP_Length(processingBlockSize))
-                                
-                                offset += processingBlockSize
-                            }
-                        }}}} // End of buffer closures
+                            // Convolve and accumulate to right ear
+                            renderer.convolverRightEar.processAndAccumulate(
+                                input: currentInput,
+                                outputAccumulator: currentRightOut
+                            )
+                        }
                     }
                 }
             }
+            
+            offset += processingBlockSize
         }
         
-        // Handle remaining frames (passthrough)
+        // Handle remaining frames (passthrough/simple mix)
         if offset < frameCount {
             for i in offset..<frameCount {
-                leftOutput[i] = leftInput[i]
-                rightOutput[i] = rightInput[i]
+                leftOutput[i] = inputs.count >= 1 ? inputs[0][i] : 0
+                rightOutput[i] = inputs.count >= 2 ? inputs[1][i] : 0
             }
         }
     }
@@ -344,15 +419,18 @@ enum HRIRError: LocalizedError {
     case invalidChannelCount(Int)
     case emptyFile
     case convolutionSetupFailed(String)
+    case invalidChannelMapping(String)
 
     var errorDescription: String? {
         switch self {
         case .invalidChannelCount(let count):
-            return "Invalid HRIR channel count: \(count). Must have at least 1 channel."
+            return "Invalid HRIR channel count: \(count). Must have at least 2 channels."
         case .emptyFile:
             return "HRIR file is empty"
         case .convolutionSetupFailed(let detail):
             return "Failed to set up convolution: \(detail)"
+        case .invalidChannelMapping(let detail):
+            return "Invalid channel mapping: \(detail)"
         }
     }
 }

@@ -2,8 +2,7 @@
 //  AudioGraphManager.swift
 //  MacHRIR
 //
-//  Manages CoreAudio graph with separate Input/Output Audio Units
-//  CRITICAL: Uses CoreAudio directly, NOT AVAudioEngine (see PASSTHROUGH_SPEC.md)
+//  Manages CoreAudio graph with multi-channel input support
 //
 
 import Foundation
@@ -12,7 +11,7 @@ import AVFoundation
 import Combine
 import Accelerate
 
-/// Manages audio input/output using separate CoreAudio units
+/// Manages audio input/output using separate CoreAudio units with multi-channel support
 class AudioGraphManager: ObservableObject {
 
     // MARK: - Published Properties
@@ -23,36 +22,35 @@ class AudioGraphManager: ObservableObject {
     @Published var errorMessage: String?
     @Published var inputLevel: Float = 0.0
     @Published var outputLevel: Float = 0.0
-    @Published var meteringEnabled: Bool = false // Disabled by default for debugging
+    @Published var meteringEnabled: Bool = false
 
     // MARK: - Private Properties
 
     fileprivate var inputUnit: AudioUnit?
     fileprivate var outputUnit: AudioUnit?
     fileprivate let circularBuffer: CircularBuffer
-    private let bufferSize: Int = 65536  // ~1.5 seconds at 48kHz stereo
+    private let bufferSize: Int = 65536
 
-    private var inputChannelCount: UInt32 = 2
-    private var outputChannelCount: UInt32 = 2
-    private var currentSampleRate: Double = 48000.0
+    fileprivate var inputChannelCount: UInt32 = 2
+    fileprivate var outputChannelCount: UInt32 = 2
+    fileprivate var currentSampleRate: Double = 48000.0
     
     // UI Update Throttling
     fileprivate var lastUIUpdateTime: Double = 0.0
-    fileprivate let uiUpdateInterval: Double = 0.05 // Update UI every 50ms
+    fileprivate let uiUpdateInterval: Double = 0.05
 
-    // Pre-allocated buffers for interleaving (avoid allocations in callbacks)
+    // Pre-allocated buffers for multi-channel processing
     fileprivate var inputInterleaveBuffer: [Float] = []
     fileprivate var outputInterleaveBuffer: [Float] = []
-    fileprivate let maxFramesPerCallback: Int = 4096  // Max expected frame count
+    fileprivate let maxFramesPerCallback: Int = 4096
+    fileprivate let maxChannels: Int = 16  // Support up to 16 channels
 
-    // Buffers for per-channel processing
-    fileprivate var leftChannelBuffer: [Float] = []
-    fileprivate var rightChannelBuffer: [Float] = []
-    fileprivate var leftProcessedBuffer: [Float] = []
-    fileprivate var rightProcessedBuffer: [Float] = []
+    // Multi-channel buffers (one per channel)
+    fileprivate var inputChannelBuffers: [[Float]] = []
+    fileprivate var outputStereoLeft: [Float] = []
+    fileprivate var outputStereoRight: [Float] = []
     
     // Pre-allocated AudioBufferList for Input Callback
-    // We use UnsafeMutableRawPointer to hold the memory for the AudioBufferList + buffers
     fileprivate var inputAudioBufferListPtr: UnsafeMutableRawPointer?
     fileprivate var inputAudioBuffersPtr: [UnsafeMutableRawPointer] = []
 
@@ -64,15 +62,17 @@ class AudioGraphManager: ObservableObject {
     init() {
         self.circularBuffer = CircularBuffer(size: bufferSize)
 
-        // Pre-allocate interleave buffers (stereo at max frame count)
-        self.inputInterleaveBuffer = [Float](repeating: 0, count: maxFramesPerCallback * 2)
-        self.outputInterleaveBuffer = [Float](repeating: 0, count: maxFramesPerCallback * 2)
+        // Pre-allocate interleave buffers (max channels at max frame count)
+        self.inputInterleaveBuffer = [Float](repeating: 0, count: maxFramesPerCallback * maxChannels)
+        self.outputInterleaveBuffer = [Float](repeating: 0, count: maxFramesPerCallback * maxChannels)
 
-        // Pre-allocate processing buffers
-        self.leftChannelBuffer = [Float](repeating: 0, count: maxFramesPerCallback)
-        self.rightChannelBuffer = [Float](repeating: 0, count: maxFramesPerCallback)
-        self.leftProcessedBuffer = [Float](repeating: 0, count: maxFramesPerCallback)
-        self.rightProcessedBuffer = [Float](repeating: 0, count: maxFramesPerCallback)
+        // Pre-allocate per-channel buffers
+        for _ in 0..<maxChannels {
+            inputChannelBuffers.append([Float](repeating: 0, count: maxFramesPerCallback))
+        }
+        
+        outputStereoLeft = [Float](repeating: 0, count: maxFramesPerCallback)
+        outputStereoRight = [Float](repeating: 0, count: maxFramesPerCallback)
     }
 
     deinit {
@@ -89,16 +89,24 @@ class AudioGraphManager: ObservableObject {
             return
         }
 
-        stop()  // Stop any existing units
+        stop()
 
         do {
             try setupInputUnit(device: inputDevice)
             try setupOutputUnit(device: outputDevice)
 
-            // Reset buffer before starting
+            // Notify HRIR manager of the input layout
+            if let hrirManager = hrirManager, let activePreset = hrirManager.activePreset {
+                let inputLayout = InputLayout.detect(channelCount: Int(inputChannelCount))
+                hrirManager.activatePreset(
+                    activePreset,
+                    targetSampleRate: currentSampleRate,
+                    inputLayout: inputLayout
+                )
+            }
+
             circularBuffer.reset()
 
-            // Start both units
             var status = AudioOutputUnitStart(inputUnit!)
             guard status == noErr else {
                 throw AudioError.startFailed(status, "Failed to start input unit")
@@ -149,7 +157,7 @@ class AudioGraphManager: ObservableObject {
     func selectInputDevice(_ device: AudioDevice) {
         inputDevice = device
         if isRunning {
-            start()  // Restart with new device
+            start()
         }
     }
 
@@ -157,7 +165,7 @@ class AudioGraphManager: ObservableObject {
     func selectOutputDevice(_ device: AudioDevice) {
         outputDevice = device
         if isRunning {
-            start()  // Restart with new device
+            start()
         }
     }
     
@@ -168,22 +176,17 @@ class AudioGraphManager: ObservableObject {
         
         let bytesPerChannel = maxFrames * MemoryLayout<Float>.size
         
-        // Allocate AudioBufferList memory
-        // AudioBufferList = UInt32 mNumberBuffers + [AudioBuffer]
         let bufferListSize = MemoryLayout<AudioBufferList>.size + max(0, channelCount - 1) * MemoryLayout<AudioBuffer>.size
         inputAudioBufferListPtr = UnsafeMutableRawPointer.allocate(byteCount: bufferListSize, alignment: MemoryLayout<AudioBufferList>.alignment)
         
-        // Initialize AudioBufferList
         let abl = inputAudioBufferListPtr!.assumingMemoryBound(to: AudioBufferList.self)
         abl.pointee.mNumberBuffers = UInt32(channelCount)
         
-        // Allocate data buffers
         for _ in 0..<channelCount {
             let buffer = UnsafeMutableRawPointer.allocate(byteCount: bytesPerChannel, alignment: 16)
             inputAudioBuffersPtr.append(buffer)
         }
         
-        // Link buffers to AudioBufferList
         let buffers = UnsafeMutableAudioBufferListPointer(abl)
         for (i, buffer) in inputAudioBuffersPtr.enumerated() {
             buffers[i].mNumberChannels = 1
@@ -207,7 +210,6 @@ class AudioGraphManager: ObservableObject {
     // MARK: - Private Setup Methods
 
     private func setupInputUnit(device: AudioDevice) throws {
-        // 1. Create component description
         var componentDesc = AudioComponentDescription(
             componentType: kAudioUnitType_Output,
             componentSubType: kAudioUnitSubType_HALOutput,
@@ -216,7 +218,6 @@ class AudioGraphManager: ObservableObject {
             componentFlagsMask: 0
         )
 
-        // 2. Find and instantiate component
         guard let component = AudioComponentFindNext(nil, &componentDesc) else {
             throw AudioError.componentNotFound
         }
@@ -227,13 +228,12 @@ class AudioGraphManager: ObservableObject {
             throw AudioError.instantiationFailed(status)
         }
 
-        // 3. Enable input (element 1)
         var enableIO: UInt32 = 1
         status = AudioUnitSetProperty(
             inputUnit,
             kAudioOutputUnitProperty_EnableIO,
             kAudioUnitScope_Input,
-            1,  // Input element
+            1,
             &enableIO,
             UInt32(MemoryLayout<UInt32>.size)
         )
@@ -241,13 +241,12 @@ class AudioGraphManager: ObservableObject {
             throw AudioError.propertySetFailed(status, "Failed to enable input")
         }
 
-        // 4. Disable output (element 0)
         var disableIO: UInt32 = 0
         status = AudioUnitSetProperty(
             inputUnit,
             kAudioOutputUnitProperty_EnableIO,
             kAudioUnitScope_Output,
-            0,  // Output element
+            0,
             &disableIO,
             UInt32(MemoryLayout<UInt32>.size)
         )
@@ -255,7 +254,6 @@ class AudioGraphManager: ObservableObject {
             throw AudioError.propertySetFailed(status, "Failed to disable output")
         }
 
-        // 5. Set device BEFORE format (CRITICAL)
         var deviceID = device.id
         status = AudioUnitSetProperty(
             inputUnit,
@@ -269,14 +267,13 @@ class AudioGraphManager: ObservableObject {
             throw AudioError.deviceSetFailed(status)
         }
 
-        // 6. Get device's format
         var deviceFormat = AudioStreamBasicDescription()
         var size = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
         status = AudioUnitGetProperty(
             inputUnit,
             kAudioUnitProperty_StreamFormat,
             kAudioUnitScope_Input,
-            1,  // Input element
+            1,
             &deviceFormat,
             &size
         )
@@ -287,10 +284,10 @@ class AudioGraphManager: ObservableObject {
         inputChannelCount = deviceFormat.mChannelsPerFrame
         currentSampleRate = deviceFormat.mSampleRate
         
-        // Pre-allocate buffers for callback
+        print("[AudioGraph] Input device: \(device.name), Channels: \(inputChannelCount), Sample Rate: \(currentSampleRate)")
+        
         allocateInputBuffers(channelCount: Int(inputChannelCount), maxFrames: maxFramesPerCallback)
 
-        // 7. Set stream format (non-interleaved)
         var streamFormat = AudioStreamBasicDescription(
             mSampleRate: deviceFormat.mSampleRate,
             mFormatID: kAudioFormatLinearPCM,
@@ -309,7 +306,7 @@ class AudioGraphManager: ObservableObject {
             inputUnit,
             kAudioUnitProperty_StreamFormat,
             kAudioUnitScope_Output,
-            1,  // Input element (output of input scope)
+            1,
             &streamFormat,
             UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
         )
@@ -317,7 +314,6 @@ class AudioGraphManager: ObservableObject {
             throw AudioError.formatSetFailed(status)
         }
 
-        // 8. Set input callback
         let selfPtr = Unmanaged.passUnretained(self).toOpaque()
         var callback = AURenderCallbackStruct(
             inputProc: inputRenderCallback,
@@ -336,7 +332,6 @@ class AudioGraphManager: ObservableObject {
             throw AudioError.callbackSetFailed(status)
         }
 
-        // 9. Initialize
         status = AudioUnitInitialize(inputUnit)
         guard status == noErr else {
             throw AudioError.initializationFailed(status, "Input unit")
@@ -346,7 +341,6 @@ class AudioGraphManager: ObservableObject {
     }
 
     private func setupOutputUnit(device: AudioDevice) throws {
-        // 1. Create component description
         var componentDesc = AudioComponentDescription(
             componentType: kAudioUnitType_Output,
             componentSubType: kAudioUnitSubType_HALOutput,
@@ -355,7 +349,6 @@ class AudioGraphManager: ObservableObject {
             componentFlagsMask: 0
         )
 
-        // 2. Find and instantiate component
         guard let component = AudioComponentFindNext(nil, &componentDesc) else {
             throw AudioError.componentNotFound
         }
@@ -366,7 +359,6 @@ class AudioGraphManager: ObservableObject {
             throw AudioError.instantiationFailed(status)
         }
 
-        // 3. Set device BEFORE format (CRITICAL)
         var deviceID = device.id
         status = AudioUnitSetProperty(
             outputUnit,
@@ -380,14 +372,13 @@ class AudioGraphManager: ObservableObject {
             throw AudioError.deviceSetFailed(status)
         }
 
-        // 4. Get device format
         var deviceFormat = AudioStreamBasicDescription()
         var size = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
         status = AudioUnitGetProperty(
             outputUnit,
             kAudioUnitProperty_StreamFormat,
             kAudioUnitScope_Output,
-            0,  // Output element
+            0,
             &deviceFormat,
             &size
         )
@@ -397,7 +388,6 @@ class AudioGraphManager: ObservableObject {
 
         outputChannelCount = deviceFormat.mChannelsPerFrame
 
-        // 5. Set stream format (non-interleaved)
         var streamFormat = AudioStreamBasicDescription(
             mSampleRate: deviceFormat.mSampleRate,
             mFormatID: kAudioFormatLinearPCM,
@@ -416,7 +406,7 @@ class AudioGraphManager: ObservableObject {
             outputUnit,
             kAudioUnitProperty_StreamFormat,
             kAudioUnitScope_Input,
-            0,  // Output element (input to output scope)
+            0,
             &streamFormat,
             UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
         )
@@ -424,7 +414,6 @@ class AudioGraphManager: ObservableObject {
             throw AudioError.formatSetFailed(status)
         }
 
-        // 6. Set render callback
         let selfPtr = Unmanaged.passUnretained(self).toOpaque()
         var callback = AURenderCallbackStruct(
             inputProc: outputRenderCallback,
@@ -443,7 +432,6 @@ class AudioGraphManager: ObservableObject {
             throw AudioError.callbackSetFailed(status)
         }
 
-        // 7. Initialize
         status = AudioUnitInitialize(outputUnit)
         guard status == noErr else {
             throw AudioError.initializationFailed(status, "Output unit")
@@ -469,56 +457,44 @@ private func inputRenderCallback(
 
     guard let inputUnit = manager.inputUnit else { return noErr }
     
-    // Use pre-allocated buffer list
     guard let audioBufferListPtr = manager.inputAudioBufferListPtr else { return noErr }
     let audioBufferList = audioBufferListPtr.assumingMemoryBound(to: AudioBufferList.self)
     
-    // Update data size for this specific callback
     let buffers = UnsafeMutableAudioBufferListPointer(audioBufferList)
     let bytesPerChannel = Int(inNumberFrames) * 4
     for i in 0..<buffers.count {
         buffers[i].mDataByteSize = UInt32(bytesPerChannel)
     }
 
-    // Check if we should update UI (throttled)
     let currentTime = CFAbsoluteTimeGetCurrent()
     let shouldUpdateUI = manager.meteringEnabled && (currentTime - manager.lastUIUpdateTime > manager.uiUpdateInterval)
 
-    // Pull audio from input device
     let status = AudioUnitRender(
         inputUnit,
         ioActionFlags,
         inTimeStamp,
-        1,  // Input element
+        1,
         inNumberFrames,
         audioBufferList
     )
 
-    // Write to circular buffer and calculate level
     if status == noErr {
         var maxLevel: Float = 0.0
 
-        // Interleave the channels and write to circular buffer
-        // This ensures proper channel ordering for the output callback
         let frameCount = Int(inNumberFrames)
         let channelCount = buffers.count
         let totalSamples = frameCount * channelCount
 
-        // Use cblas_scopy for fast strided copy (Interleaving)
         for channel in 0..<channelCount {
             if let data = buffers[channel].mData {
                 let samples = data.assumingMemoryBound(to: Float.self)
                 
-                // Calculate max level for UI ONLY if needed
                 if shouldUpdateUI {
                     var channelMax: Float = 0.0
                     vDSP_maxmgv(samples, 1, &channelMax, vDSP_Length(frameCount))
                     maxLevel = max(maxLevel, channelMax)
                 }
                 
-                // Copy with stride
-                // Source: samples (stride 1)
-                // Dest: inputInterleaveBuffer starting at offset 'channel' (stride channelCount)
                 manager.inputInterleaveBuffer.withUnsafeMutableBufferPointer { ptr in
                     if let baseAddr = ptr.baseAddress {
                         var one: Float = 1.0
@@ -528,21 +504,16 @@ private func inputRenderCallback(
             }
         }
 
-        // Write interleaved data to circular buffer
         manager.inputInterleaveBuffer.withUnsafeBytes { ptr in
             if let baseAddress = ptr.baseAddress {
                 manager.circularBuffer.write(data: baseAddress, size: totalSamples * 4)
             }
         }
 
-        // Update input level (throttled)
         if shouldUpdateUI {
             DispatchQueue.main.async {
                 manager.inputLevel = maxLevel
             }
-            // Note: We don't update lastUIUpdateTime here to avoid contention/confusion with output callback.
-            // The output callback handles the time update, or we can just let them race loosely.
-            // For better results, we can update it here too if we want independent throttling.
         }
     }
 
@@ -564,55 +535,36 @@ private func outputRenderCallback(
     guard let bufferList = ioData else { return noErr }
 
     let buffers = UnsafeMutableAudioBufferListPointer(bufferList)
-    let channelCount = Int(bufferList.pointee.mNumberBuffers)
+    let outputChannelCount = Int(bufferList.pointee.mNumberBuffers)
     let frameCount = Int(inNumberFrames)
 
     var maxLevel: Float = 0.0
 
     // Read interleaved data from circular buffer
-    let totalSamples = frameCount * channelCount
+    let inputChannelCount = Int(manager.inputChannelCount)
+    let totalSamples = frameCount * inputChannelCount
     let totalBytes = totalSamples * 4
 
     let bytesRead = manager.outputInterleaveBuffer.withUnsafeMutableBytes { ptr in
         manager.circularBuffer.read(into: ptr.baseAddress!, size: totalBytes)
     }
 
-    // Check if we got enough data
     if bytesRead < totalBytes {
-        // Fill remaining with silence
         let samplesRead = bytesRead / 4
         for i in samplesRead..<totalSamples {
             manager.outputInterleaveBuffer[i] = 0.0
         }
     }
 
-    // De-interleave into separate channel buffers using vDSP_vsmul (multiplication by 1.0 is a copy)
-    // Left Channel (0)
-    manager.outputInterleaveBuffer.withUnsafeBufferPointer { srcPtr in
-        guard let srcBase = srcPtr.baseAddress else { return }
-        
-        var one: Float = 1.0
-        
-        // Left
-        manager.leftChannelBuffer.withUnsafeMutableBufferPointer { dstPtr in
-            if let dstBase = dstPtr.baseAddress {
-                vDSP_vsmul(srcBase, vDSP_Stride(channelCount), &one, dstBase, 1, vDSP_Length(frameCount))
-            }
-        }
-        
-        // Right
-        if channelCount > 1 {
-            manager.rightChannelBuffer.withUnsafeMutableBufferPointer { dstPtr in
+    // De-interleave into per-channel buffers
+    for channel in 0..<min(inputChannelCount, manager.maxChannels) {
+        manager.outputInterleaveBuffer.withUnsafeBufferPointer { srcPtr in
+            guard let srcBase = srcPtr.baseAddress else { return }
+            
+            var one: Float = 1.0
+            manager.inputChannelBuffers[channel].withUnsafeMutableBufferPointer { dstPtr in
                 if let dstBase = dstPtr.baseAddress {
-                    vDSP_vsmul(srcBase.advanced(by: 1), vDSP_Stride(channelCount), &one, dstBase, 1, vDSP_Length(frameCount))
-                }
-            }
-        } else {
-            // Mono -> Stereo copy
-            let byteCount = frameCount * MemoryLayout<Float>.size
-            manager.rightChannelBuffer.withUnsafeMutableBytes { dst in
-                manager.leftChannelBuffer.withUnsafeBytes { src in
-                    memcpy(dst.baseAddress!, src.baseAddress!, byteCount)
+                    vDSP_vsmul(srcBase.advanced(by: channel), vDSP_Stride(inputChannelCount), &one, dstBase, 1, vDSP_Length(frameCount))
                 }
             }
         }
@@ -621,57 +573,48 @@ private func outputRenderCallback(
     // Process through HRIR convolution if enabled
     let shouldProcess = manager.hrirManager?.convolutionEnabled ?? false
 
-    // Debug logging (once)
-    struct CallbackLogger {
-        static var hasLogged = false
-    }
-    if !CallbackLogger.hasLogged {
-        print("[AudioCallback] Frame count: \(frameCount), Should process: \(shouldProcess)")
-        CallbackLogger.hasLogged = true
-    }
-
     if shouldProcess {
-        // Process audio - buffers are pre-allocated, just pass them
+        // Pass all input channels to HRIR manager
+        let inputChannels = Array(manager.inputChannelBuffers.prefix(inputChannelCount))
         manager.hrirManager?.processAudio(
-            leftInput: manager.leftChannelBuffer,
-            rightInput: manager.rightChannelBuffer,
-            leftOutput: &manager.leftProcessedBuffer,
-            rightOutput: &manager.rightProcessedBuffer,
+            inputs: inputChannels,
+            leftOutput: &manager.outputStereoLeft,
+            rightOutput: &manager.outputStereoRight,
             frameCount: frameCount
         )
     } else {
-        // Passthrough mode - fast copy using memcpy
+        // Passthrough: simple stereo downmix
         let byteCount = frameCount * MemoryLayout<Float>.size
-        manager.leftProcessedBuffer.withUnsafeMutableBytes { dst in
-            manager.leftChannelBuffer.withUnsafeBytes { src in
-                memcpy(dst.baseAddress!, src.baseAddress!, byteCount)
+        if inputChannelCount >= 1 {
+            manager.outputStereoLeft.withUnsafeMutableBytes { dst in
+                manager.inputChannelBuffers[0].withUnsafeBytes { src in
+                    memcpy(dst.baseAddress!, src.baseAddress!, byteCount)
+                }
             }
         }
-        manager.rightProcessedBuffer.withUnsafeMutableBytes { dst in
-            manager.rightChannelBuffer.withUnsafeBytes { src in
-                memcpy(dst.baseAddress!, src.baseAddress!, byteCount)
+        if inputChannelCount >= 2 {
+            manager.outputStereoRight.withUnsafeMutableBytes { dst in
+                manager.inputChannelBuffers[1].withUnsafeBytes { src in
+                    memcpy(dst.baseAddress!, src.baseAddress!, byteCount)
+                }
             }
         }
     }
 
     // Write processed audio to output buffers
-    
-    // Check if we should update UI (throttled)
     let currentTime = CFAbsoluteTimeGetCurrent()
     let shouldUpdateUI = manager.meteringEnabled && (currentTime - manager.lastUIUpdateTime > manager.uiUpdateInterval)
     
-    for i in 0..<min(channelCount, 2) {
+    for i in 0..<min(outputChannelCount, 2) {
         if let data = buffers[i].mData {
             let samples = data.assumingMemoryBound(to: Float.self)
-            let sourceBuffer = (i == 0) ? manager.leftProcessedBuffer : manager.rightProcessedBuffer
+            let sourceBuffer = (i == 0) ? manager.outputStereoLeft : manager.outputStereoRight
             
-            // Copy to output buffer
             let byteCount = frameCount * MemoryLayout<Float>.size
             sourceBuffer.withUnsafeBytes { src in
                 memcpy(samples, src.baseAddress!, byteCount)
             }
             
-            // Calculate level for UI ONLY if needed
             if shouldUpdateUI {
                 var channelMax: Float = 0.0
                 vDSP_maxmgv(samples, 1, &channelMax, vDSP_Length(frameCount))
@@ -680,7 +623,6 @@ private func outputRenderCallback(
         }
     }
 
-    // Update output level (throttled)
     if shouldUpdateUI {
         manager.lastUIUpdateTime = currentTime
         DispatchQueue.main.async {

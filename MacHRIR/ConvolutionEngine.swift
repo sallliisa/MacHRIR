@@ -267,6 +267,25 @@ class ConvolutionEngine {
         }
     }
     
+    /// Process and accumulate: convolve input and ADD result to existing output buffer
+    /// This is critical for multi-channel binaural mixing where multiple virtual speakers
+    /// contribute to the same stereo output.
+    /// - Parameters:
+    ///   - input: Input buffer pointer (must contain `blockSize` samples)
+    ///   - outputAccumulator: Output buffer pointer to accumulate into (must have capacity for `blockSize` samples)
+    func processAndAccumulate(input: UnsafePointer<Float>, outputAccumulator: UnsafeMutablePointer<Float>) {
+        // We need a temporary buffer to hold the convolution result
+        // Then we add it to the accumulator
+        let tempOutput = UnsafeMutablePointer<Float>.allocate(capacity: blockSize)
+        defer { tempOutput.deallocate() }
+        
+        // Perform convolution
+        process(input: input, output: tempOutput)
+        
+        // Add to accumulator using vDSP
+        vDSP_vadd(outputAccumulator, 1, tempOutput, 1, outputAccumulator, 1, vDSP_Length(blockSize))
+    }
+    
     /// Reset the engine state
     func reset() {
         memset(inputBuffer, 0, fftSize * MemoryLayout<Float>.size)
