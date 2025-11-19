@@ -151,6 +151,23 @@ class ConvolutionEngine {
             
             // Forward FFT
             vDSP_fft_zrip(fftSetup, &splitH, 1, log2n, FFTDirection(kFFTDirection_Forward))
+
+            // Debug: Check first partition energy
+            if p == 0 {
+                var energy: Float = 0
+                vDSP_sve(hrirReal[0], 1, &energy, vDSP_Length(fftSizeHalf))
+                print("[Convolution] Partition 0 real sum: \(energy)")
+            }
+        }
+
+        // Debug: Log HRIR FFT energy for first few partitions
+        for p in 0..<min(3, partitionCount) {
+            var realEnergy: Float = 0
+            var imagEnergy: Float = 0
+            vDSP_svesq(hrirReal[p], 1, &realEnergy, vDSP_Length(fftSizeHalf))
+            vDSP_svesq(hrirImag[p], 1, &imagEnergy, vDSP_Length(fftSizeHalf))
+            let totalEnergy = sqrt(realEnergy + imagEnergy)
+            print("[Convolution] Partition[\(p)] FFT energy: \(String(format: "%.6f", totalEnergy))")
         }
     }
     

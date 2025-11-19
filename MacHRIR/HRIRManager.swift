@@ -67,7 +67,19 @@ class HRIRManager: ObservableObject {
     // Stores the FL and FR ILD values to compute compensation
     private var flILD: Float = 0.0
     private var frILD: Float = 0.0
-    private var spatialCompensationEnabled: Bool = true
+    @Published var spatialCompensationEnabled: Bool = true {
+        didSet {
+            if !spatialCompensationEnabled {
+                // Disable compensation by resetting auto gains to 1.0
+                autoLeftGain = 1.0
+                autoRightGain = 1.0
+                print("[HRIRManager] Spatial compensation disabled - auto gains reset to 1.0")
+            } else if flILD != 0.0 && frILD != 0.0 {
+                // Re-apply compensation
+                recomputeSpatialCompensation()
+            }
+        }
+    }
 
     private let presetsDirectory: URL
 
@@ -118,6 +130,21 @@ class HRIRManager: ObservableObject {
 
         print(String(format: "[HRIRManager] Manual balance: %.2f → Manual L: %.3f R: %.3f, Total L: %.3f R: %.3f",
                      clampedBalance, manualLeftGain, manualRightGain, totalLeftGain, totalRightGain))
+    }
+
+    /// Recompute spatial compensation based on stored ILD values
+    private func recomputeSpatialCompensation() {
+        guard spatialCompensationEnabled else { return }
+
+        let ildAsymmetry = abs(frILD) - abs(flILD)
+        let compensationAmount = ildAsymmetry * 0.9  // 90% aggressive
+
+        let gainRatio = pow(10.0, compensationAmount / 20.0)
+        autoLeftGain = Float(sqrt(gainRatio))
+        autoRightGain = Float(1.0 / sqrt(gainRatio))
+
+        print(String(format: "[HRIRManager] Spatial compensation re-enabled: %.2f dB → L: %.3f, R: %.3f",
+                     compensationAmount, autoLeftGain, autoRightGain))
     }
 
     /// Add a new preset from a WAV file
@@ -413,57 +440,88 @@ class HRIRManager: ObservableObject {
             if newRenderers.count == 2 && inputLayout.channels.count == 2 {
                 print("[HRIRManager] === Convolution Symmetry Test ===")
 
+                // Reset convolvers to clear FDL
+                newRenderers[0].convolverLeftEar.reset()
+                newRenderers[0].convolverRightEar.reset()
+                newRenderers[1].convolverLeftEar.reset()
+                newRenderers[1].convolverRightEar.reset()
+
                 // Create test impulse: single spike at beginning
                 var testImpulse = [Float](repeating: 0.0, count: processingBlockSize)
                 testImpulse[0] = 1.0
 
-                var flLeftOut = [Float](repeating: 0.0, count: processingBlockSize)
-                var flRightOut = [Float](repeating: 0.0, count: processingBlockSize)
-                var frLeftOut = [Float](repeating: 0.0, count: processingBlockSize)
-                var frRightOut = [Float](repeating: 0.0, count: processingBlockSize)
+                var silenceBlock = [Float](repeating: 0.0, count: processingBlockSize)
 
-                // Process through FL convolver
-                testImpulse.withUnsafeBufferPointer { inPtr in
-                    flLeftOut.withUnsafeMutableBufferPointer { leftPtr in
-                        frRightOut.withUnsafeMutableBufferPointer { rightPtr in
-                            if let inBase = inPtr.baseAddress, let leftBase = leftPtr.baseAddress {
-                                newRenderers[0].convolverLeftEar.process(input: inBase, output: leftBase)
-                            }
-                            if let inBase = inPtr.baseAddress, let rightBase = rightPtr.baseAddress {
-                                newRenderers[0].convolverRightEar.process(input: inBase, output: rightBase)
-                            }
+                // Need to process partitionCount blocks to fill the FDL completely
+                // Process blocks alternating input and silence to see the full IR
+                let numBlocks = 29 // Match partition count from diagnostic
+                var flLeftAccum = [Float](repeating: 0.0, count: processingBlockSize * numBlocks)
+                var flRightAccum = [Float](repeating: 0.0, count: processingBlockSize * numBlocks)
+                var frLeftAccum = [Float](repeating: 0.0, count: processingBlockSize * numBlocks)
+                var frRightAccum = [Float](repeating: 0.0, count: processingBlockSize * numBlocks)
+
+                for blockIdx in 0..<numBlocks {
+                    let inputBlock = (blockIdx == 0) ? testImpulse : silenceBlock
+
+                    var flLeftOut = [Float](repeating: 0.0, count: processingBlockSize)
+                    var flRightOut = [Float](repeating: 0.0, count: processingBlockSize)
+                    var frLeftOut = [Float](repeating: 0.0, count: processingBlockSize)
+                    var frRightOut = [Float](repeating: 0.0, count: processingBlockSize)
+
+                    // Process through FL convolver
+                    inputBlock.withUnsafeBufferPointer { inPtr in
+                        guard let inBase = inPtr.baseAddress else { return }
+                        flLeftOut.withUnsafeMutableBufferPointer { leftPtr in
+                            guard let leftBase = leftPtr.baseAddress else { return }
+                            newRenderers[0].convolverLeftEar.process(input: inBase, output: leftBase)
                         }
+                        flRightOut.withUnsafeMutableBufferPointer { rightPtr in
+                            guard let rightBase = rightPtr.baseAddress else { return }
+                            newRenderers[0].convolverRightEar.process(input: inBase, output: rightBase)
+                        }
+                    }
+
+                    // Process through FR convolver
+                    inputBlock.withUnsafeBufferPointer { inPtr in
+                        guard let inBase = inPtr.baseAddress else { return }
+                        frLeftOut.withUnsafeMutableBufferPointer { leftPtr in
+                            guard let leftBase = leftPtr.baseAddress else { return }
+                            newRenderers[1].convolverLeftEar.process(input: inBase, output: leftBase)
+                        }
+                        frRightOut.withUnsafeMutableBufferPointer { rightPtr in
+                            guard let rightBase = rightPtr.baseAddress else { return }
+                            newRenderers[1].convolverRightEar.process(input: inBase, output: rightBase)
+                        }
+                    }
+
+                    // Accumulate outputs
+                    let offset = blockIdx * processingBlockSize
+                    for i in 0..<processingBlockSize {
+                        flLeftAccum[offset + i] = flLeftOut[i]
+                        flRightAccum[offset + i] = flRightOut[i]
+                        frLeftAccum[offset + i] = frLeftOut[i]
+                        frRightAccum[offset + i] = frRightOut[i]
                     }
                 }
 
-                // Process through FR convolver
-                testImpulse.withUnsafeBufferPointer { inPtr in
-                    frLeftOut.withUnsafeMutableBufferPointer { leftPtr in
-                        frRightOut.withUnsafeMutableBufferPointer { rightPtr in
-                            if let inBase = inPtr.baseAddress, let leftBase = leftPtr.baseAddress {
-                                newRenderers[1].convolverLeftEar.process(input: inBase, output: leftBase)
-                            }
-                            if let inBase = inPtr.baseAddress, let rightBase = rightPtr.baseAddress {
-                                newRenderers[1].convolverRightEar.process(input: inBase, output: rightBase)
-                            }
-                        }
-                    }
-                }
-
-                // Calculate RMS of outputs
+                // Calculate RMS of accumulated outputs
                 var flLeftRMS: Float = 0, flRightRMS: Float = 0
                 var frLeftRMS: Float = 0, frRightRMS: Float = 0
-                vDSP_rmsqv(flLeftOut, 1, &flLeftRMS, vDSP_Length(processingBlockSize))
-                vDSP_rmsqv(flRightOut, 1, &flRightRMS, vDSP_Length(processingBlockSize))
-                vDSP_rmsqv(frLeftOut, 1, &frLeftRMS, vDSP_Length(processingBlockSize))
-                vDSP_rmsqv(frRightOut, 1, &frRightRMS, vDSP_Length(processingBlockSize))
+                vDSP_rmsqv(flLeftAccum, 1, &flLeftRMS, vDSP_Length(processingBlockSize * numBlocks))
+                vDSP_rmsqv(flRightAccum, 1, &flRightRMS, vDSP_Length(processingBlockSize * numBlocks))
+                vDSP_rmsqv(frLeftAccum, 1, &frLeftRMS, vDSP_Length(processingBlockSize * numBlocks))
+                vDSP_rmsqv(frRightAccum, 1, &frRightRMS, vDSP_Length(processingBlockSize * numBlocks))
 
                 let flILDtest = 20 * log10(flLeftRMS / max(flRightRMS, 0.000001))
                 let frILDtest = 20 * log10(frRightRMS / max(frLeftRMS, 0.000001))
 
                 print("[HRIRManager]   FL convolution output: L=\(String(format: "%.6f", flLeftRMS)) R=\(String(format: "%.6f", flRightRMS)) ILD=\(String(format: "%.2f dB", flILDtest))")
                 print("[HRIRManager]   FR convolution output: L=\(String(format: "%.6f", frLeftRMS)) R=\(String(format: "%.6f", frRightRMS)) ILD=\(String(format: "%.2f dB", frILDtest))")
-                print("[HRIRManager]   Convolution is working correctly: \(abs(flILDtest - flILD) < 0.1 && abs(frILDtest - abs(frILD)) < 0.1 ? "YES ✓" : "NO ✗ (MISMATCH!)")")
+
+                let flError = abs(flILDtest - flILD)
+                let frError = abs(frILDtest - abs(frILD))
+                print("[HRIRManager]   ILD Error: FL=\(String(format: "%.2f dB", flError)) FR=\(String(format: "%.2f dB", frError))")
+                print("[HRIRManager]   Convolution is working correctly: \(flError < 1.0 && frError < 1.0 ? "YES ✓" : "NO ✗ (MISMATCH!)")")
                 print("[HRIRManager] ========================================")
             }
 

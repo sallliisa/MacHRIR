@@ -133,6 +133,19 @@ struct ContentView: View {
 
                 // Balance Control
                 BalanceControlView(hrirManager: hrirManager)
+
+                // Spatial Compensation Toggle
+                HStack {
+                    Text("Auto Compensation:")
+                        .frame(width: 120, alignment: .trailing)
+                    Toggle("Enable Automatic Spatial Compensation", isOn: $hrirManager.spatialCompensationEnabled)
+                        .toggleStyle(.switch)
+                        .labelsHidden()
+
+                    Text("(fixes L/R spatial asymmetry)")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
             }
             .padding()
             .background(Color.gray.opacity(0.1))
