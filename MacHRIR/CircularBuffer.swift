@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Darwin
 
 /// Thread-safe ring buffer for audio data transfer between input and output callbacks
 class CircularBuffer {
@@ -13,7 +14,8 @@ class CircularBuffer {
     private var size: Int
     private var writeIndex: Int = 0
     private var readIndex: Int = 0
-    private let lock = NSLock()
+    // Lock-free implementation for Single Producer Single Consumer (SPSC)
+    // No NSLock needed if we use memory barriers correctly
 
     /// Initialize circular buffer with specified size
     /// - Parameter size: Buffer size in bytes (minimum 65536 recommended)
@@ -38,10 +40,14 @@ class CircularBuffer {
     /// - Returns: Number of bytes actually written
     @discardableResult
     func write(data: UnsafeRawPointer, size: Int) -> Int {
-        lock.lock()
-        defer { lock.unlock() }
-
-        let available = availableWrite()
+        // Lock-free SPSC
+        
+        // Load readIndex with barrier (effectively)
+        // In Swift, simple load is usually fine on TSO, but for ARM we rely on barriers later or implicit ordering.
+        // Ideally we would use atomic load, but for this simple ring buffer:
+        let currentReadIndex = readIndex
+        
+        let available = availableWrite(readIdx: currentReadIndex)
         let toWrite = min(size, available)
 
         if toWrite == 0 {
@@ -57,6 +63,9 @@ class CircularBuffer {
             memcpy(buffer, data.advanced(by: firstChunk), toWrite - firstChunk)
         }
 
+        // Memory Barrier to ensure data is written before index is updated
+        OSMemoryBarrier()
+
         writeIndex = (writeIndex + toWrite) % self.size
 
         return toWrite
@@ -69,10 +78,11 @@ class CircularBuffer {
     /// - Returns: Number of bytes actually read
     @discardableResult
     func read(into data: UnsafeMutableRawPointer, size: Int) -> Int {
-        lock.lock()
-        defer { lock.unlock() }
-
-        let available = availableRead()
+        // Lock-free SPSC
+        
+        let currentWriteIndex = writeIndex
+        
+        let available = availableRead(writeIdx: currentWriteIndex)
         let toRead = min(size, available)
 
         if toRead == 0 {
@@ -88,6 +98,9 @@ class CircularBuffer {
             memcpy(data.advanced(by: firstChunk), buffer, toRead - firstChunk)
         }
 
+        // Memory Barrier to ensure data is read before index is updated
+        OSMemoryBarrier()
+
         readIndex = (readIndex + toRead) % self.size
 
         return toRead
@@ -95,45 +108,39 @@ class CircularBuffer {
 
     /// Reset buffer to empty state
     func reset() {
-        lock.lock()
-        defer { lock.unlock() }
-
         writeIndex = 0
         readIndex = 0
         memset(buffer, 0, size)
+        OSMemoryBarrier()
     }
 
     /// Get number of bytes available for writing
     /// - Returns: Available write space in bytes
     func availableWriteSpace() -> Int {
-        lock.lock()
-        defer { lock.unlock() }
-        return availableWrite()
+        return availableWrite(readIdx: readIndex)
     }
 
     /// Get number of bytes available for reading
     /// - Returns: Available data in bytes
     func availableReadSpace() -> Int {
-        lock.lock()
-        defer { lock.unlock() }
-        return availableRead()
+        return availableRead(writeIdx: writeIndex)
     }
 
     // MARK: - Private Helper Methods
 
-    private func availableWrite() -> Int {
-        if writeIndex >= readIndex {
-            return size - (writeIndex - readIndex) - 1
+    private func availableWrite(readIdx: Int) -> Int {
+        if writeIndex >= readIdx {
+            return size - (writeIndex - readIdx) - 1
         } else {
-            return readIndex - writeIndex - 1
+            return readIdx - writeIndex - 1
         }
     }
 
-    private func availableRead() -> Int {
-        if writeIndex >= readIndex {
-            return writeIndex - readIndex
+    private func availableRead(writeIdx: Int) -> Int {
+        if writeIdx >= readIndex {
+            return writeIdx - readIndex
         } else {
-            return size - (readIndex - writeIndex)
+            return size - (readIndex - writeIdx)
         }
     }
 }

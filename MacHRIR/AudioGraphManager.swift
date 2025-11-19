@@ -23,6 +23,7 @@ class AudioGraphManager: ObservableObject {
     @Published var errorMessage: String?
     @Published var inputLevel: Float = 0.0
     @Published var outputLevel: Float = 0.0
+    @Published var meteringEnabled: Bool = false // Disabled by default for debugging
 
     // MARK: - Private Properties
 
@@ -479,6 +480,10 @@ private func inputRenderCallback(
         buffers[i].mDataByteSize = UInt32(bytesPerChannel)
     }
 
+    // Check if we should update UI (throttled)
+    let currentTime = CFAbsoluteTimeGetCurrent()
+    let shouldUpdateUI = manager.meteringEnabled && (currentTime - manager.lastUIUpdateTime > manager.uiUpdateInterval)
+
     // Pull audio from input device
     let status = AudioUnitRender(
         inputUnit,
@@ -504,10 +509,12 @@ private func inputRenderCallback(
             if let data = buffers[channel].mData {
                 let samples = data.assumingMemoryBound(to: Float.self)
                 
-                // Calculate max level for UI
-                var channelMax: Float = 0.0
-                vDSP_maxmgv(samples, 1, &channelMax, vDSP_Length(frameCount))
-                maxLevel = max(maxLevel, channelMax)
+                // Calculate max level for UI ONLY if needed
+                if shouldUpdateUI {
+                    var channelMax: Float = 0.0
+                    vDSP_maxmgv(samples, 1, &channelMax, vDSP_Length(frameCount))
+                    maxLevel = max(maxLevel, channelMax)
+                }
                 
                 // Copy with stride
                 // Source: samples (stride 1)
@@ -529,11 +536,13 @@ private func inputRenderCallback(
         }
 
         // Update input level (throttled)
-        let currentTime = CFAbsoluteTimeGetCurrent()
-        if currentTime - manager.lastUIUpdateTime > manager.uiUpdateInterval {
+        if shouldUpdateUI {
             DispatchQueue.main.async {
                 manager.inputLevel = maxLevel
             }
+            // Note: We don't update lastUIUpdateTime here to avoid contention/confusion with output callback.
+            // The output callback handles the time update, or we can just let them race loosely.
+            // For better results, we can update it here too if we want independent throttling.
         }
     }
 
@@ -646,6 +655,11 @@ private func outputRenderCallback(
     }
 
     // Write processed audio to output buffers
+    
+    // Check if we should update UI (throttled)
+    let currentTime = CFAbsoluteTimeGetCurrent()
+    let shouldUpdateUI = manager.meteringEnabled && (currentTime - manager.lastUIUpdateTime > manager.uiUpdateInterval)
+    
     for i in 0..<min(channelCount, 2) {
         if let data = buffers[i].mData {
             let samples = data.assumingMemoryBound(to: Float.self)
@@ -657,16 +671,17 @@ private func outputRenderCallback(
                 memcpy(samples, src.baseAddress!, byteCount)
             }
             
-            // Calculate level for UI
-            var channelMax: Float = 0.0
-            vDSP_maxmgv(samples, 1, &channelMax, vDSP_Length(frameCount))
-            maxLevel = max(maxLevel, channelMax)
+            // Calculate level for UI ONLY if needed
+            if shouldUpdateUI {
+                var channelMax: Float = 0.0
+                vDSP_maxmgv(samples, 1, &channelMax, vDSP_Length(frameCount))
+                maxLevel = max(maxLevel, channelMax)
+            }
         }
     }
 
     // Update output level (throttled)
-    let currentTime = CFAbsoluteTimeGetCurrent()
-    if currentTime - manager.lastUIUpdateTime > manager.uiUpdateInterval {
+    if shouldUpdateUI {
         manager.lastUIUpdateTime = currentTime
         DispatchQueue.main.async {
             manager.outputLevel = maxLevel

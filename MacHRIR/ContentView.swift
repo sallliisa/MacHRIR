@@ -140,6 +140,9 @@ struct ContentView: View {
                 Text("Audio Levels")
                     .font(.headline)
 
+                Toggle("Enable Metering", isOn: $audioManager.meteringEnabled)
+                    .font(.caption)
+
                 HStack {
                     Text("Input:")
                         .frame(width: 80, alignment: .trailing)
