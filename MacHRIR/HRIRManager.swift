@@ -55,6 +55,20 @@ class HRIRManager: ObservableObject {
     // Temporary buffers for convolution (pre-allocated)
     private var tempConvolutionBuffer: [Float] = []
 
+    // Automatic spatial asymmetry compensation (computed from HRIR analysis)
+    private var autoLeftGain: Float = 1.0
+    private var autoRightGain: Float = 1.0
+
+    // Manual balance adjustment (from UI slider)
+    private var manualLeftGain: Float = 1.0
+    private var manualRightGain: Float = 1.0
+
+    // Spatial asymmetry compensation
+    // Stores the FL and FR ILD values to compute compensation
+    private var flILD: Float = 0.0
+    private var frILD: Float = 0.0
+    private var spatialCompensationEnabled: Bool = true
+
     private let presetsDirectory: URL
 
     // MARK: - Initialization
@@ -66,15 +80,45 @@ class HRIRManager: ObservableObject {
 
         // Create directory if it doesn't exist
         try? FileManager.default.createDirectory(at: presetsDirectory, withIntermediateDirectories: true)
-        
+
         // Pre-allocate temp buffer
         tempConvolutionBuffer = [Float](repeating: 0, count: processingBlockSize)
+
+        // Note: Balance compensation is now computed automatically based on HRIR ILD analysis
+        // when a preset is activated. The balance slider can still be used for manual adjustment.
 
         // Load existing presets
         loadPresets()
     }
 
     // MARK: - Public Methods
+
+    /// Set the manual stereo balance adjustment
+    /// - Parameter balance: Balance adjustment from -1.0 (boost left) to +1.0 (boost right)
+    ///   0.0 = no manual adjustment, -0.1 = slightly boost left, +0.1 = slightly boost right
+    /// Note: This adjustment is ADDED to the automatic ILD compensation
+    func setBalance(_ balance: Float) {
+        let clampedBalance = max(-1.0, min(1.0, balance))
+
+        if clampedBalance < 0 {
+            // Boost left, attenuate right
+            manualLeftGain = 1.0 + abs(clampedBalance) * 0.15  // Up to +15% boost
+            manualRightGain = 1.0 - abs(clampedBalance) * 0.15  // Up to -15% attenuation
+        } else if clampedBalance > 0 {
+            // Boost right, attenuate left
+            manualLeftGain = 1.0 - clampedBalance * 0.15
+            manualRightGain = 1.0 + clampedBalance * 0.15
+        } else {
+            manualLeftGain = 1.0
+            manualRightGain = 1.0
+        }
+
+        let totalLeftGain = autoLeftGain * manualLeftGain
+        let totalRightGain = autoRightGain * manualRightGain
+
+        print(String(format: "[HRIRManager] Manual balance: %.2f → Manual L: %.3f R: %.3f, Total L: %.3f R: %.3f",
+                     clampedBalance, manualLeftGain, manualRightGain, totalLeftGain, totalRightGain))
+    }
 
     /// Add a new preset from a WAV file
     /// - Parameter fileURL: URL to the WAV file
@@ -172,9 +216,87 @@ class HRIRManager: ObservableObject {
             for (idx, channelData) in wavData.audioData.enumerated() {
                 let rms = calculateRMS(channelData)
                 let peak = channelData.map { abs($0) }.max() ?? 0
-                print("[HRIRManager]   Ch[\(idx)]: RMS=\(String(format: "%.6f", rms)) Peak=\(String(format: "%.6f", peak))")
+
+                // Calculate centroid (center of energy) to detect ITD
+                var weightedSum: Float = 0
+                var totalEnergy: Float = 0
+                for (sampleIdx, sample) in channelData.enumerated() {
+                    let energy = sample * sample
+                    weightedSum += Float(sampleIdx) * energy
+                    totalEnergy += energy
+                }
+                let centroid = totalEnergy > 0 ? weightedSum / totalEnergy : 0
+                let centroidMs = (centroid / Float(wavData.sampleRate)) * 1000.0
+
+                print("[HRIRManager]   Ch[\(idx)]: RMS=\(String(format: "%.6f", rms)) Peak=\(String(format: "%.6f", peak)) Centroid=\(String(format: "%.2fms", centroidMs))")
             }
             print("[HRIRManager] ================================")
+
+            // Analyze FL vs FR spatial symmetry for stereo
+            if wavData.audioData.count >= 4 {
+                print("[HRIRManager] === Spatial Symmetry Analysis (FL vs FR) ===")
+
+                // FL: Ch0=L ear, Ch1=R ear (assuming no swap)
+                // FR: Ch2=?, Ch3=? (need to determine)
+                let fl_L = wavData.audioData[0]
+                let fl_R = wavData.audioData[1]
+                let fr_0 = wavData.audioData[2]
+                let fr_1 = wavData.audioData[3]
+
+                // Calculate ILD (Interaural Level Difference) for FL
+                let fl_L_rms = calculateRMS(fl_L)
+                let fl_R_rms = calculateRMS(fl_R)
+                let fl_ILD_dB = 20 * log10(fl_L_rms / max(fl_R_rms, 0.000001))
+
+                // Calculate ILD for FR (both possible mappings)
+                let fr_0_rms = calculateRMS(fr_0)
+                let fr_1_rms = calculateRMS(fr_1)
+                let fr_ILD_dB_noSwap = 20 * log10(fr_0_rms / max(fr_1_rms, 0.000001))
+                let fr_ILD_dB_swap = 20 * log10(fr_1_rms / max(fr_0_rms, 0.000001))
+
+                print("[HRIRManager]   FL ILD: \(String(format: "%.2f dB", fl_ILD_dB)) (L ear \(fl_L_rms > fl_R_rms ? "louder" : "quieter"))")
+                print("[HRIRManager]   FR ILD (no swap): \(String(format: "%.2f dB", fr_ILD_dB_noSwap))")
+                print("[HRIRManager]   FR ILD (swapped): \(String(format: "%.2f dB", fr_ILD_dB_swap)) (R ear \(fr_0_rms > fr_1_rms ? "louder" : "quieter"))")
+                print("[HRIRManager]   Expected symmetric ILD: \(String(format: "%.2f dB", -fl_ILD_dB)) (mirror of FL)")
+
+                // Check which mapping gives better symmetry
+                let symmetryError_noSwap = abs(fl_ILD_dB + fr_ILD_dB_noSwap)
+                let symmetryError_swap = abs(fl_ILD_dB + fr_ILD_dB_swap)
+
+                print("[HRIRManager]   Symmetry error (no swap): \(String(format: "%.2f dB", symmetryError_noSwap))")
+                print("[HRIRManager]   Symmetry error (swapped): \(String(format: "%.2f dB", symmetryError_swap))")
+                print("[HRIRManager]   Recommendation: \(symmetryError_swap < symmetryError_noSwap ? "USE SWAP" : "NO SWAP")")
+
+                // Store ILD values for compensation
+                flILD = fl_ILD_dB
+                frILD = symmetryError_swap < symmetryError_noSwap ? fr_ILD_dB_swap : fr_ILD_dB_noSwap
+
+                // Calculate automatic balance compensation for stereo
+                if inputLayout.channels.count == 2 && spatialCompensationEnabled {
+                    // The asymmetry in ILD magnitude causes asymmetric spatial perception
+                    // If |FR_ILD| > |FL_ILD|, then FR sounds more lateral (wider)
+                    // Compensate by adjusting L/R gains to equalize perceived width
+                    let ildAsymmetry = abs(frILD) - abs(flILD)
+
+                    // Aggressive compensation: 90% of the asymmetry
+                    // Increased from 50% to address persistent spatial width difference
+                    let compensationAmount = ildAsymmetry * 0.9  // dB to compensate
+
+                    // Convert dB difference to linear gain ratio
+                    // If FR is wider (higher ILD), reduce right ear output
+                    let gainRatio = pow(10.0, compensationAmount / 20.0)
+
+                    // Apply automatic gains while preserving total energy
+                    autoLeftGain = Float(sqrt(gainRatio))
+                    autoRightGain = Float(1.0 / sqrt(gainRatio))
+
+                    print("[HRIRManager]   ILD Asymmetry: \(String(format: "%.2f dB", ildAsymmetry)) (FR \(abs(frILD) > abs(flILD) ? "wider" : "narrower") than FL)")
+                    print("[HRIRManager]   Auto Compensation: \(String(format: "%.2f dB", compensationAmount)) (90% aggressive) → L: \(String(format: "%.3f", autoLeftGain)), R: \(String(format: "%.3f", autoRightGain))")
+                    print("[HRIRManager]   Result: Effective compensation = \(String(format: "%.2f dB", 20 * log10(Double(autoLeftGain / autoRightGain))))")
+                }
+
+                print("[HRIRManager] ===============================================")
+            }
 
             // Determine HRIR mapping
             let channelMap: HRIRChannelMap
@@ -261,6 +383,14 @@ class HRIRManager: ObservableObject {
                 
                 newRenderers.append(renderer)
                 print("[HRIRManager] ✓ Input[\(inputIndex)] '\(speaker.displayName)' → HRIR L:\(leftEarIdx) R:\(rightEarIdx)")
+
+                // Verify HRIR symmetry for stereo channels
+                if inputLayout.channels.count == 2 {
+                    let leftHRIR_RMS = calculateRMS(resampledLeft)
+                    let rightHRIR_RMS = calculateRMS(resampledRight)
+                    let hrirILD = 20 * log10(leftHRIR_RMS / max(rightHRIR_RMS, 0.000001))
+                    print("[HRIRManager]     Convolver for '\(speaker.displayName)': L_HRIR RMS=\(String(format: "%.6f", leftHRIR_RMS)), R_HRIR RMS=\(String(format: "%.6f", rightHRIR_RMS)), ILD=\(String(format: "%.2f dB", hrirILD))")
+                }
             }
             
             guard !newRenderers.isEmpty else {
@@ -278,6 +408,64 @@ class HRIRManager: ObservableObject {
             }
             
             print("[HRIRManager] Successfully activated \(newRenderers.count) renderers")
+
+            // Diagnostic: Test convolution symmetry with impulse response
+            if newRenderers.count == 2 && inputLayout.channels.count == 2 {
+                print("[HRIRManager] === Convolution Symmetry Test ===")
+
+                // Create test impulse: single spike at beginning
+                var testImpulse = [Float](repeating: 0.0, count: processingBlockSize)
+                testImpulse[0] = 1.0
+
+                var flLeftOut = [Float](repeating: 0.0, count: processingBlockSize)
+                var flRightOut = [Float](repeating: 0.0, count: processingBlockSize)
+                var frLeftOut = [Float](repeating: 0.0, count: processingBlockSize)
+                var frRightOut = [Float](repeating: 0.0, count: processingBlockSize)
+
+                // Process through FL convolver
+                testImpulse.withUnsafeBufferPointer { inPtr in
+                    flLeftOut.withUnsafeMutableBufferPointer { leftPtr in
+                        frRightOut.withUnsafeMutableBufferPointer { rightPtr in
+                            if let inBase = inPtr.baseAddress, let leftBase = leftPtr.baseAddress {
+                                newRenderers[0].convolverLeftEar.process(input: inBase, output: leftBase)
+                            }
+                            if let inBase = inPtr.baseAddress, let rightBase = rightPtr.baseAddress {
+                                newRenderers[0].convolverRightEar.process(input: inBase, output: rightBase)
+                            }
+                        }
+                    }
+                }
+
+                // Process through FR convolver
+                testImpulse.withUnsafeBufferPointer { inPtr in
+                    frLeftOut.withUnsafeMutableBufferPointer { leftPtr in
+                        frRightOut.withUnsafeMutableBufferPointer { rightPtr in
+                            if let inBase = inPtr.baseAddress, let leftBase = leftPtr.baseAddress {
+                                newRenderers[1].convolverLeftEar.process(input: inBase, output: leftBase)
+                            }
+                            if let inBase = inPtr.baseAddress, let rightBase = rightPtr.baseAddress {
+                                newRenderers[1].convolverRightEar.process(input: inBase, output: rightBase)
+                            }
+                        }
+                    }
+                }
+
+                // Calculate RMS of outputs
+                var flLeftRMS: Float = 0, flRightRMS: Float = 0
+                var frLeftRMS: Float = 0, frRightRMS: Float = 0
+                vDSP_rmsqv(flLeftOut, 1, &flLeftRMS, vDSP_Length(processingBlockSize))
+                vDSP_rmsqv(flRightOut, 1, &flRightRMS, vDSP_Length(processingBlockSize))
+                vDSP_rmsqv(frLeftOut, 1, &frLeftRMS, vDSP_Length(processingBlockSize))
+                vDSP_rmsqv(frRightOut, 1, &frRightRMS, vDSP_Length(processingBlockSize))
+
+                let flILDtest = 20 * log10(flLeftRMS / max(flRightRMS, 0.000001))
+                let frILDtest = 20 * log10(frRightRMS / max(frLeftRMS, 0.000001))
+
+                print("[HRIRManager]   FL convolution output: L=\(String(format: "%.6f", flLeftRMS)) R=\(String(format: "%.6f", flRightRMS)) ILD=\(String(format: "%.2f dB", flILDtest))")
+                print("[HRIRManager]   FR convolution output: L=\(String(format: "%.6f", frLeftRMS)) R=\(String(format: "%.6f", frRightRMS)) ILD=\(String(format: "%.2f dB", frILDtest))")
+                print("[HRIRManager]   Convolution is working correctly: \(abs(flILDtest - flILD) < 0.1 && abs(frILDtest - abs(frILD)) < 0.1 ? "YES ✓" : "NO ✗ (MISMATCH!)")")
+                print("[HRIRManager] ========================================")
+            }
 
         } catch {
             DispatchQueue.main.async {
@@ -325,6 +513,9 @@ class HRIRManager: ObservableObject {
         // Debug logging (once)
         struct ProcessLogger {
             static var hasLogged = false
+            static var callCount: Int = 0
+            static var leftRMSSum: Float = 0
+            static var rightRMSSum: Float = 0
         }
         if !ProcessLogger.hasLogged && !renderers.isEmpty {
             print("[HRIRManager] Processing \(inputs.count) input channels with \(renderers.count) renderers")
@@ -333,7 +524,7 @@ class HRIRManager: ObservableObject {
             }
             ProcessLogger.hasLogged = true
         }
-        
+
         while offset + processingBlockSize <= frameCount {
             // Clear output accumulators for this block
             leftOutput.withUnsafeMutableBufferPointer { leftPtr in
@@ -381,6 +572,40 @@ class HRIRManager: ObservableObject {
                 leftOutput[i] = inputs.count >= 1 ? inputs[0][i] : 0
                 rightOutput[i] = inputs.count >= 2 ? inputs[1][i] : 0
             }
+        }
+
+        // Apply balance compensation gains (automatic + manual)
+        let totalLeftGain = autoLeftGain * manualLeftGain
+        let totalRightGain = autoRightGain * manualRightGain
+
+        if totalLeftGain != 1.0 {
+            vDSP_vsmul(leftOutput, 1, [totalLeftGain], &leftOutput, 1, vDSP_Length(frameCount))
+        }
+        if totalRightGain != 1.0 {
+            vDSP_vsmul(rightOutput, 1, [totalRightGain], &rightOutput, 1, vDSP_Length(frameCount))
+        }
+
+        // Periodic RMS level monitoring to detect left/right imbalance
+        ProcessLogger.callCount += 1
+        if ProcessLogger.callCount % 100 == 0 {
+            // Calculate RMS for left and right outputs (after gain compensation)
+            var leftRMS: Float = 0
+            var rightRMS: Float = 0
+            vDSP_rmsqv(leftOutput, 1, &leftRMS, vDSP_Length(frameCount))
+            vDSP_rmsqv(rightOutput, 1, &rightRMS, vDSP_Length(frameCount))
+
+            ProcessLogger.leftRMSSum += leftRMS
+            ProcessLogger.rightRMSSum += rightRMS
+
+            let leftAvg = ProcessLogger.leftRMSSum / Float(ProcessLogger.callCount / 100)
+            let rightAvg = ProcessLogger.rightRMSSum / Float(ProcessLogger.callCount / 100)
+            let balance = leftAvg / max(rightAvg, 0.0001) // Avoid division by zero
+
+            let totalLeft = autoLeftGain * manualLeftGain
+            let totalRight = autoRightGain * manualRightGain
+
+            print(String(format: "[HRIRManager] Output - L:%.6f R:%.6f Ratio:%.4f | Gains: Auto(L:%.3f R:%.3f) Manual(L:%.3f R:%.3f) Total(L:%.3f R:%.3f)",
+                         leftAvg, rightAvg, balance, autoLeftGain, autoRightGain, manualLeftGain, manualRightGain, totalLeft, totalRight))
         }
     }
 

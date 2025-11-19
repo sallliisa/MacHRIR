@@ -130,6 +130,9 @@ struct ContentView: View {
                             .foregroundColor(.secondary)
                     }
                 }
+
+                // Balance Control
+                BalanceControlView(hrirManager: hrirManager)
             }
             .padding()
             .background(Color.gray.opacity(0.1))

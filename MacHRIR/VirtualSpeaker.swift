@@ -129,15 +129,52 @@ struct HRIRChannelMap {
             // IMPORTANT: Based on RMS analysis, this HRIR file has:
             // Even channels = Direct path (high energy)
             // Odd channels = Cross path (low energy)
-            // 
+            //
             // For Left speaker: Ch0 = L→L (direct), Ch1 = L→R (cross)
             // For Right speaker: Ch2 = R→R (direct!), Ch3 = R→L (cross!)
             //
             // This means the channels are: [Direct, Cross] not [Left, Right]
             // So we need to determine which ear based on speaker position
-            
+
             let baseIndex = index * 2
-            
+
+            // For left-side speakers (FL, BL, SL, etc.)
+            if speaker == .FL || speaker == .BL || speaker == .SL || speaker == .TFL || speaker == .TBL || speaker == .FLC {
+                // Ch[base] = Left ear (direct), Ch[base+1] = Right ear (cross)
+                map.setMapping(speaker: speaker, leftEarIndex: baseIndex, rightEarIndex: baseIndex + 1)
+            }
+            // For right-side speakers (FR, BR, SR, etc.)
+            else if speaker == .FR || speaker == .BR || speaker == .SR || speaker == .TFR || speaker == .TBR || speaker == .FRC {
+                // Ch[base] = Right ear (direct), Ch[base+1] = Left ear (cross)
+                // So we SWAP them!
+                map.setMapping(speaker: speaker, leftEarIndex: baseIndex + 1, rightEarIndex: baseIndex)
+            }
+            // For center speakers (FC, BC, LFE)
+            else {
+                // Center speakers: assume symmetric (both ears get similar response)
+                map.setMapping(speaker: speaker, leftEarIndex: baseIndex, rightEarIndex: baseIndex + 1)
+            }
+        }
+        return map
+    }
+
+    /// Create the LEGACY swapped mapping (for testing)
+    /// This is the old implementation that swaps right channels
+    static func interleavedPairsLegacy(speakers: [VirtualSpeaker]) -> HRIRChannelMap {
+        var map = HRIRChannelMap()
+        for (index, speaker) in speakers.enumerated() {
+            // LEGACY: Based on assumption that format is [Direct, Cross]
+            // Even channels = Direct path (high energy)
+            // Odd channels = Cross path (low energy)
+            //
+            // For Left speaker: Ch0 = L→L (direct), Ch1 = L→R (cross)
+            // For Right speaker: Ch2 = R→R (direct!), Ch3 = R→L (cross!)
+            //
+            // This means the channels are: [Direct, Cross] not [Left, Right]
+            // So we need to determine which ear based on speaker position
+
+            let baseIndex = index * 2
+
             // For left-side speakers (FL, BL, SL, etc.)
             if speaker == .FL || speaker == .BL || speaker == .SL || speaker == .TFL || speaker == .TBL || speaker == .FLC {
                 // Ch[base] = Left ear (direct), Ch[base+1] = Right ear (cross)
