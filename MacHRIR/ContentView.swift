@@ -41,8 +41,6 @@ struct ContentView: View {
 
                 // Input Device Selector
                 HStack {
-                    Text("Input Device:")
-                        .frame(width: 120, alignment: .trailing)
                     Picker("Input Device", selection: Binding(
                         get: { audioManager.inputDevice },
                         set: { if let device = $0 { audioManager.selectInputDevice(device) } }
@@ -57,8 +55,6 @@ struct ContentView: View {
 
                 // Output Device Selector
                 HStack {
-                    Text("Output Device:")
-                        .frame(width: 120, alignment: .trailing)
                     Picker("Output Device", selection: Binding(
                         get: { audioManager.outputDevice },
                         set: { if let device = $0 { audioManager.selectOutputDevice(device) } }
@@ -83,8 +79,6 @@ struct ContentView: View {
                     .font(.headline)
 
                 HStack {
-                    Text("Active Preset:")
-                        .frame(width: 120, alignment: .trailing)
                     Picker("Preset", selection: Binding(
                         get: { hrirManager.activePreset },
                         set: { if let preset = $0 {
