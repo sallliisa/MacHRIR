@@ -1,0 +1,1 @@
+Copy: RL=5 RR=6 SL=0.0 SR=0.0

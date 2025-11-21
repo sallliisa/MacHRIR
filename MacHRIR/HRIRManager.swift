@@ -329,6 +329,12 @@ class HRIRManager: ObservableObject {
             let channelMap: HRIRChannelMap
             if let customMap = hrirMap {
                 channelMap = customMap
+            } else if wavData.channelCount == 14 {
+                // Auto-detect HeSuVi 14-channel layout
+                // This is a specific layout used by HeSuVi for 7.1 HRIRs
+                print("[HRIRManager] Auto-detected HeSuVi 14-channel mapping")
+                let speakers = inputLayout.channels
+                channelMap = HRIRChannelMap.hesuvi14Channel(speakers: Array(speakers))
             } else {
                 // Auto-detect mapping format based on channel count
                 // Assume interleaved pairs by default

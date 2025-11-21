@@ -1,0 +1,1 @@
+Copy: L=-0dB*L R=-0dB*R C=-0dB*C SUB=-0dB*SUB RL=-0dB*RL RR=-0dB*RR SL=-0dB*SL SR=-0dB*SR

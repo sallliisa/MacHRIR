@@ -1,0 +1,1 @@
+Copy: CVI=1.00*CVI+2.00*SUBVI

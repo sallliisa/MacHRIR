@@ -1,0 +1,1 @@
+Eval: cffq=700; dshb=3; xatt=-9; xdel=18; xshd=-10; xmet=false

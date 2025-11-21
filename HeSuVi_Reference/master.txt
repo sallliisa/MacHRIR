@@ -1,0 +1,1 @@
+Copy: LVI=1.00*LVI RVI=1.00*RVI

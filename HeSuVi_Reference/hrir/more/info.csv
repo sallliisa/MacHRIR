@@ -1,0 +1,11 @@
+aria*;HRTFs of mannequins (dummy heads) measured at ARI used with ffmpeg`s sofalizer/n/nCAUTION: Do not use any upmix!
+ari*;HRTFs from the ARI database used with ffmpeg`s sofalizer/n/nCAUTION: Do not use any upmix!
+cf*;HRTFs of Neumann KU 100 measured as part of the Club Fritz project used with ffmpeg`s sofalizer/n/nCAUTION: Do not use any upmix!
+ciair;HRTF from CIAIR (data02) by Fumitada Itakura, Kazuya Takeda, Mikio Ikeda, Shoji Kajita and Takanori Nishino. The data can be obtained from The Database of Head Related Transfer Functions hosted by the Takeda Laboratory at Nagoya University: www.sp.m.is.nagoya-u.ac.jp/HRTF/ database.html    It is Copyright 1999 by Itakura Laboratory and the Center for Integrated Acoustic Information Research. It is provided free with no restrictions on use, provided the authors are cited. CAUTION: Do not use any upmix!
+cipic*;HRTFs from the CIPIC database used with ffmpeg`s sofalizer/n/nCAUTION: Do not use any upmix!
+irc*;HRTFs from IRCAM which are available free of charge from: recherche.ircam.fr/equipes/salles/listen/ index.html/n/nCAUTION: Do not use any upmix!
+mit;HRTF from MIT of the KEMAR dummy head used with ffmpeg`s sofalizer/n/nCAUTION: Do not use any upmix!
+scut;HRTF from SCUT database of the KEMAR used with ffmpeg`s sofalizer/n/nCAUTION: Do not use any upmix!
+tub;HRTF from TU-Berlin of the KEMAR dummy-head used with ffmpeg`s sofalizer/n/nCAUTION: Do not use any upmix!
+tuc;HRTF from the Technical University of Cologne of the dummy-head Neumann K100 used with ffmpeg`s sofalizer/n/nCAUTION: Do not use any upmix!
+*;Unknown file! This file is probably a leftover from an older version of HeSuVi and has simply been renamed or replaced, you can manually delete it.

@@ -1,0 +1,95 @@
+#2.0.0.1
+
+Include: prelude.txt
+
+Include: devna.txt
+If: ((sizeof(regexSearch(device, tolower(deviceGuid))) > 0) and (sizeof(regexSearch("capture", stage)) == 0)) or (sizeof(regexSearch("Benchmark", deviceName)) > 0)
+  Stage: post-mix
+  If: outputChannelCount == 8
+  ElseIf: outputChannelCount == 2
+    Copy: C=0.0 SUB=0.0 RL=0.0 RR=0.0 SL=0.0 SR=0.0
+  ElseIf: outputChannelCount == 6
+    Copy: RL=0.5*RL RR=0.5*RR
+  ElseIf: outputChannelCount == 4
+    Copy: RL=0.5*RL RR=0.5*RR C=0.0 SUB=0.0
+  EndIf:
+
+  Include: deact.txt
+  Include: eocc.txt
+  If: active and enough and (sampleRate == 48000 or sampleRate == 44100)
+    If: outputChannelCount == 8
+      Stage: pre-mix
+      Include: incc.txt
+      If: fakeChannelCount == 2
+        Include: matrix.txt
+      ElseIf: fakeChannelCount == 6
+        Include: matrix5.1.txt
+      EndIf:
+      Stage: post-mix
+    ElseIf: outputChannelCount == 2
+      Include: matrix.txt
+    EndIf:
+    Include: move.txt
+    If: outputChannelCount > 5
+      Channel: SUBVI
+      Filter: ON LP Fc 111 Hz
+      Include: lfc.txt
+    EndIf:
+    Copy: L0=LVI R1=LVI SL0=SLVI SR1=SLVI RL0=RLVI RR1=RLVI C0=CVI R0=RVI L1=RVI SR0=SRVI SL1=SRVI RR0=RRVI RL1=RRVI C1=CVI
+    Channel: L0 R1 SL0 SR1 RL0 RR1 C0 R0 L1 SR0 SL1 RR0 RL1 C1
+    If: sampleRate == 48000
+      Include: conv.txt
+    Else:
+      Include: conv44.txt
+    EndIf:
+    Include: mix.txt
+    Include: master.txt
+  Else:
+    Copy: LVI=L RVI=R
+  EndIf:
+
+  Include: cfact.txt
+  If: usecf
+    Copy: LCF=L+0.5*C+0.6*RL+0.4*RR+0.7*SL+0.3*SR RCF=R+0.5*C+0.4*RL+0.6*RR+0.3*SL+0.7*SR
+    Copy: LX=RCF RX=LCF
+    Include: crofe.txt
+    Channel: LCF RCF
+    Filter: ON HS Fc `cffq` Hz Gain `dshb` dB
+    Channel: LX RX
+    Preamp: `xatt` dB
+    Delay: `xdel` samples
+    If: xmet
+      Preamp: -30 dB
+      Filter: ON LS 6 dB Fc `cffq` Hz Gain 30 dB
+    Else:
+      Filter: ON HS Fc `cffq` Hz Gain `xshd` dB
+    EndIf:
+    Copy: LCF=LCF+LX RCF=RCF+RX
+    Include: cfmaster.txt
+  EndIf:
+
+  Include: conn.txt
+  Include: gain.txt
+  Channel: L R
+  Include: eqf.txt
+  Channel: SL SR
+  Include: eqs.txt
+  Channel: C SUB
+  Include: eqc.txt
+  Channel: RL RR
+  Include: eqb.txt
+
+  If: (sizeof(regexSearch("Benchmark", deviceName)) > 0) and (sizeof(regexSearch("Front", connectionName)) == 0)
+    If: (sizeof(regexSearch("All", connectionName)) > 0)
+      Copy: L=L+C+RL+SL R=R+SUB+RR+SR
+    ElseIf: (sizeof(regexSearch("Side", connectionName)) > 0)
+      Copy: L=SL R=SR
+    ElseIf: (sizeof(regexSearch("CtrSbw", connectionName)) > 0)
+      Copy: L=C R=SUB
+    ElseIf: (sizeof(regexSearch("Back", connectionName)) > 0)
+      Copy: L=RL R=RR
+    EndIf:
+  EndIf:
+EndIf:
+
+Include: postlude.txt
