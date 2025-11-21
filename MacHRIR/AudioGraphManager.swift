@@ -36,6 +36,9 @@ class AudioGraphManager: ObservableObject {
     fileprivate var outputInterleaveBuffer: [Float] = []
     fileprivate let maxFramesPerCallback: Int = 4096
     fileprivate let maxChannels: Int = 16  // Support up to 16 channels
+    
+    // Buffering state
+    fileprivate var isBuffering: Bool = true
 
     // Multi-channel buffers (one per channel)
     fileprivate var inputChannelBuffers: [[Float]] = []
@@ -458,8 +461,6 @@ private func inputRenderCallback(
         buffers[i].mDataByteSize = UInt32(bytesPerChannel)
     }
 
-    let currentTime = CFAbsoluteTimeGetCurrent()
-
     let status = AudioUnitRender(
         inputUnit,
         ioActionFlags,
@@ -474,15 +475,30 @@ private func inputRenderCallback(
         let channelCount = buffers.count
         let totalSamples = frameCount * channelCount
 
-        for channel in 0..<channelCount {
-            if let data = buffers[channel].mData {
-                let samples = data.assumingMemoryBound(to: Float.self)
-                
-                manager.inputInterleaveBuffer.withUnsafeMutableBufferPointer { ptr in
-                    if let baseAddr = ptr.baseAddress {
-                        var one: Float = 1.0
-                        vDSP_vsmul(samples, 1, &one, baseAddr.advanced(by: channel), vDSP_Stride(channelCount), vDSP_Length(frameCount))
-                    }
+        // Interleave
+        manager.inputInterleaveBuffer.withUnsafeMutableBufferPointer { ptr in
+            guard let baseAddr = ptr.baseAddress else { return }
+            
+            for channel in 0..<channelCount {
+                if let data = buffers[channel].mData {
+                    let samples = data.assumingMemoryBound(to: Float.self)
+                    // Copy with stride to interleave
+                    // vDSP_vsmul with 1.0 is just a copy, but vDSP_mmov is better or just a loop?
+                    // Actually, to interleave:
+                    // dst[i * stride + channel] = src[i]
+                    // vDSP can do this with stride.
+                    
+                    // Using vDSP_mmov (memory move) or vDSP_vadd with 0?
+                    // vDSP_vsmul with 1.0 is fine for strided copy if we want to be "DSP-ish",
+                    // but let's just use what was there but cleaner if possible.
+                    // The original code used vDSP_vsmul to copy to interleaved buffer.
+                    // We can keep it or simplify. Let's keep the logic but remove the explicit "1.0" variable if not needed,
+                    // or just keep it as is for the copy-to-interleaved step since it works.
+                    // Wait, the user complained about "messy" audio. Redundant math might add noise? Unlikely with 1.0.
+                    // But let's optimize.
+                    
+                    var one: Float = 1.0
+                    vDSP_vsmul(samples, 1, &one, baseAddr.advanced(by: channel), vDSP_Stride(channelCount), vDSP_Length(frameCount))
                 }
             }
         }
@@ -515,18 +531,39 @@ private func outputRenderCallback(
     let outputChannelCount = Int(bufferList.pointee.mNumberBuffers)
     let frameCount = Int(inNumberFrames)
 
-    var maxLevel: Float = 0.0
-
     // Read interleaved data from circular buffer
     let inputChannelCount = Int(manager.inputChannelCount)
     let totalSamples = frameCount * inputChannelCount
     let totalBytes = totalSamples * 4
+    
+    // Buffering Logic
+    let playbackThreshold = 2048 * inputChannelCount * 4 // e.g. 2048 frames
+    
+    if manager.isBuffering {
+        if manager.circularBuffer.availableReadSpace() >= playbackThreshold {
+            manager.isBuffering = false
+            // print("Buffering complete, resuming playback")
+        } else {
+            // Output silence
+            for i in 0..<buffers.count {
+                if let data = buffers[i].mData {
+                    memset(data, 0, Int(buffers[i].mDataByteSize))
+                }
+            }
+            return noErr
+        }
+    }
 
     let bytesRead = manager.outputInterleaveBuffer.withUnsafeMutableBytes { ptr in
         manager.circularBuffer.read(into: ptr.baseAddress!, size: totalBytes)
     }
 
     if bytesRead < totalBytes {
+        // Underrun detected
+        // print("Underrun detected, switching to buffering")
+        manager.isBuffering = true
+        
+        // Fill the rest with silence
         let samplesRead = bytesRead / 4
         for i in samplesRead..<totalSamples {
             manager.outputInterleaveBuffer[i] = 0.0
@@ -538,9 +575,14 @@ private func outputRenderCallback(
         manager.outputInterleaveBuffer.withUnsafeBufferPointer { srcPtr in
             guard let srcBase = srcPtr.baseAddress else { return }
             
-            var one: Float = 1.0
+            // Just copy, no multiply
             manager.inputChannelBuffers[channel].withUnsafeMutableBufferPointer { dstPtr in
                 if let dstBase = dstPtr.baseAddress {
+                    // Strided copy from interleaved to planar
+                    // vDSP_mmovD is for doubles.
+                    // Use vDSP_vadd with zero or just a loop?
+                    // vDSP_vsmul with 1.0 is standard for strided copy.
+                    var one: Float = 1.0
                     vDSP_vsmul(srcBase.advanced(by: channel), vDSP_Stride(inputChannelCount), &one, dstBase, 1, vDSP_Length(frameCount))
                 }
             }

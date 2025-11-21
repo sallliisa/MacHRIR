@@ -260,39 +260,15 @@ struct HRIRChannelMap {
     /// 4: RL0 (BL Left)
     /// 5: RL1 (BL Right)
     /// 6: C0 (FC Left)
-    /// 7: R1 (FR Left - Swapped!)
-    /// 8: R0 (FR Right - Swapped!)
-    /// 9: SR1 (SR Left - Swapped!)
-    /// 10: SR0 (SR Right - Swapped!)
-    /// 11: RR1 (BR Left - Swapped!)
-    /// 12: RR0 (BR Right - Swapped!)
+    /// 7: R1 (FR Right)
+    /// 8: R0 (FR Left)
+    /// 9: SR1 (SR Right)
+    /// 10: SR0 (SR Left)
+    /// 11: RR1 (BR Right)
+    /// 12: RR0 (BR Left)
     /// 13: C1 (FC Right)
     static func hesuvi14Channel(speakers: [VirtualSpeaker]) -> HRIRChannelMap {
         var map = HRIRChannelMap()
-        
-        // Mapping based on HeSuVi documentation and user provided list
-        // FL: L0(0), L1(1) -> Standard
-        // FR: R0(8), R1(7) -> Note: HeSuVi lists R1 then R0, but usually 0=Left, 1=Right.
-        // Let's look at the list again:
-        // ... C0, R1, R0, SR1, SR0 ...
-        // This implies:
-        // Index 7 = R1 (Right Ear signal for Right Speaker)
-        // Index 8 = R0 (Left Ear signal for Right Speaker)
-        //
-        // Wait, for a Right speaker:
-        // "Right Ear signal" (R1) should be the DIRECT path (louder).
-        // "Left Ear signal" (R0) should be the CROSS path (quieter).
-        //
-        // So for FR:
-        // Left Ear Index = 8 (R0)
-        // Right Ear Index = 7 (R1)
-        
-        // Let's verify the others:
-        // SL: SL0(2), SL1(3) -> Left(2), Right(3)
-        // SR: SR1(9), SR0(10) -> Left(10), Right(9) (Swapped in list: SR1, SR0)
-        // RL (BL): RL0(4), RL1(5) -> Left(4), Right(5)
-        // RR (BR): RR1(11), RR0(12) -> Left(12), Right(11) (Swapped in list: RR1, RR0)
-        // C (FC): C0(6), C1(13) -> Left(6), Right(13)
         
         for speaker in speakers {
             switch speaker {
