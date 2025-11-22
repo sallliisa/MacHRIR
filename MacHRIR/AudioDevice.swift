@@ -324,8 +324,8 @@ class AudioDeviceManager: ObservableObject {
             return nil
         }
 
-        var name: CFString = "" as CFString
-        var size = UInt32(MemoryLayout<CFString>.size)
+        var name: Unmanaged<CFString>?
+        var size = UInt32(MemoryLayout<Unmanaged<CFString>>.size)
 
         guard AudioObjectGetPropertyData(
             deviceID,
@@ -338,7 +338,11 @@ class AudioDeviceManager: ObservableObject {
             return nil
         }
 
-        return name as String
+        guard let cfString = name?.takeUnretainedValue() else {
+            return nil
+        }
+
+        return cfString as String
     }
 
     private static func getChannelCount(deviceID: AudioDeviceID, scope: AudioObjectPropertyScope) -> UInt32 {

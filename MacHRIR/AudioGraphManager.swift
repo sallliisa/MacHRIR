@@ -616,14 +616,14 @@ private func outputRenderCallback(
         // Passthrough: simple stereo downmix
         let byteCount = frameCount * MemoryLayout<Float>.size
         if inputChannelCount >= 1 {
-            manager.outputStereoLeft.withUnsafeMutableBytes { dst in
+            _ = manager.outputStereoLeft.withUnsafeMutableBytes { dst in
                 manager.inputChannelBuffers[0].withUnsafeBytes { src in
                     memcpy(dst.baseAddress!, src.baseAddress!, byteCount)
                 }
             }
         }
         if inputChannelCount >= 2 {
-            manager.outputStereoRight.withUnsafeMutableBytes { dst in
+            _ = manager.outputStereoRight.withUnsafeMutableBytes { dst in
                 manager.inputChannelBuffers[1].withUnsafeBytes { src in
                     memcpy(dst.baseAddress!, src.baseAddress!, byteCount)
                 }
@@ -638,7 +638,7 @@ private func outputRenderCallback(
             let sourceBuffer = (i == 0) ? manager.outputStereoLeft : manager.outputStereoRight
             
             let byteCount = frameCount * MemoryLayout<Float>.size
-            sourceBuffer.withUnsafeBytes { src in
+            _ = sourceBuffer.withUnsafeBytes { src in
                 memcpy(samples, src.baseAddress!, byteCount)
             }
         }
