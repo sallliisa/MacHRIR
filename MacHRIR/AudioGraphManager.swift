@@ -623,7 +623,7 @@ private func outputRenderCallback(
         }
 
         // Process through HRIR convolution if enabled
-        let shouldProcess = manager.hrirManager?.convolutionEnabled ?? false
+        let shouldProcess = manager.hrirManager?.isConvolutionActive ?? false
 
         if shouldProcess, let channelPtrs = manager.inputChannelBufferPtrs {
             // Pass input channel pointers to HRIR manager (zero-copy, zero-allocation)
