@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-MacHRIR is a macOS system-wide HRIR (Head-Related Impulse Response) binauralizer application that provides spatial audio processing through headphones. It uses CoreAudio to route audio from any input device through HRIR convolution to any output device, without changing system defaults. Similar to HeSuVi but designed specifically for macOS.
+MacHRIR is a macOS menu bar application that provides system-wide HRIR (Head-Related Impulse Response) spatial audio processing through headphones. It uses CoreAudio to route audio from any input device through HRIR convolution to any output device, without changing system defaults. Similar to HeSuVi but designed specifically for macOS.
 
-**Key Technologies**: Swift, CoreAudio, SwiftUI, Accelerate framework (FFT convolution)
+**Key Technologies**: Swift, CoreAudio, SwiftUI (minimal), Accelerate framework (FFT convolution)
 
 ## Build Commands
 
@@ -35,9 +35,24 @@ open MacHRIR.xcodeproj
 
 ## Architecture
 
+### Application Structure
+
+**Menu Bar Application**: MacHRIR runs as a menu bar app (status item in menu bar) with no main window. The UI is entirely menu-based.
+
+**Entry Point Flow**:
+```
+MacHRIRApp.swift (@main)
+    ↓
+AppDelegate.swift (NSApplicationDelegate)
+    ↓
+MenuBarManager.swift (NSStatusItem + NSMenu)
+    ↓
+AudioGraphManager + HRIRManager + AudioDeviceManager
+```
+
 ### Critical Design Constraint: CoreAudio Only
 
-**DO NOT use AVAudioEngine** for device selection. AVAudioEngine cannot select independent input/output devices on macOS. This project uses **separate CoreAudio Audio Units** for input and output. See `PASSTHROUGH_SPEC.md` for detailed rationale.
+**DO NOT use AVAudioEngine** for device selection. AVAudioEngine cannot select independent input/output devices on macOS. This project uses **separate CoreAudio Audio Units** for input and output.
 
 ### Audio Flow
 
@@ -49,7 +64,17 @@ Output Callback ← Output Audio Unit (HAL) ← Output Device ← Multi-channel 
 
 ### Core Components
 
-#### 1. AudioGraphManager.swift
+#### 1. MenuBarManager.swift
+Manages the menu bar UI and coordinates all managers.
+
+**Key features**:
+- Creates NSStatusItem with waveform icon
+- Builds dynamic menu with device selection, preset management, controls
+- Coordinates AudioGraphManager, HRIRManager, AudioDeviceManager, SettingsManager
+- Persists user settings (selected devices, presets, convolution state)
+- Handles menu updates and user interactions
+
+#### 2. AudioGraphManager.swift
 Manages dual CoreAudio units for independent input/output device selection.
 
 **Key features**:
@@ -65,7 +90,12 @@ Manages dual CoreAudio units for independent input/output device selection.
 - Device must be set BEFORE stream format
 - AudioBufferList must be properly sized for variable-length array: `MemoryLayout<AudioBufferList>.size + (channelCount - 1) * MemoryLayout<AudioBuffer>.size`
 
-#### 2. HRIRManager.swift
+**Recent optimizations**:
+- All buffers pre-allocated in init() to avoid malloc in audio callbacks
+- Uses `UnsafeMutablePointer` for zero-overhead channel buffer access
+- Buffering state to prevent underruns on startup
+
+#### 3. HRIRManager.swift
 Manages HRIR presets and multi-channel binaural rendering.
 
 **Architecture**:
@@ -86,7 +116,7 @@ for each inputChannel:
     renderer.convolverRightEar.processAndAccumulate(input, &rightOutput)
 ```
 
-#### 3. ConvolutionEngine.swift
+#### 4. ConvolutionEngine.swift
 Implements **Uniform Partitioned Overlap-Save (UPOLS)** FFT convolution using Accelerate.
 
 **Key method**: `processAndAccumulate(input:outputAccumulator:)`
@@ -94,7 +124,14 @@ Implements **Uniform Partitioned Overlap-Save (UPOLS)** FFT convolution using Ac
 - Zero-latency processing (block size: 512 samples)
 - Supports long HRIRs via partitioning
 
-#### 4. VirtualSpeaker.swift
+**Optimization**: Uses `FFTSetupManager` singleton to cache FFT setup objects and avoid redundant vDSP_create_fftsetup() calls.
+
+#### 5. FFTSetupManager.swift
+Singleton that caches FFT setup objects to reduce memory allocations.
+
+**Purpose**: vDSP_create_fftsetup() can be expensive. This manager ensures each FFT size only creates one setup instance, shared across all ConvolutionEngine instances.
+
+#### 6. VirtualSpeaker.swift
 Defines the abstraction layer between input channels and HRIR data.
 
 **Key types**:
@@ -107,8 +144,16 @@ Defines the abstraction layer between input channels and HRIR data.
 2. **Split Blocks**: Ch0-N=All Left Ears, Ch(N+1)-2N=All Right Ears
 3. **Custom**: HeSuVi mix.txt format parsing
 
-#### 5. CircularBuffer.swift
+#### 7. CircularBuffer.swift
 Thread-safe ring buffer (65KB) with NSLock for clock drift tolerance between independent devices.
+
+**Note**: CPP_MIGRATION_PLAN.md documents a planned migration to lock-free C++ implementation, but current version uses NSLock.
+
+#### 8. AudioDevice.swift
+Enumerates and manages CoreAudio devices.
+
+#### 9. SettingsManager.swift
+Persists user preferences using UserDefaults (device selections, preset selections, convolution state).
 
 ### Audio Format Specifications
 
@@ -155,15 +200,18 @@ Users can provide custom HeSuVi mix.txt files for non-standard HRIR mappings.
 
 **NEVER do these in audio callbacks** (`inputRenderCallback`, `renderCallback`):
 - Memory allocation/deallocation
-- Swift runtime operations (prefer C-like code)
+- Swift runtime operations that trigger allocations
 - Objective-C message sends
 - Locks (except minimal circular buffer lock)
 - Logging/debugging (use atomic flags instead)
 
 **ALWAYS**:
-- Pre-allocate all buffers during initialization
+- Pre-allocate all buffers during initialization (see AudioGraphManager.init())
 - Use `UnsafeMutablePointer` for channel buffers
 - Use `defer` blocks to ensure cleanup in setup code
+- Zero out buffers using memset or pointer initialization
+
+**Recent fixes**: All transient mallocs in audio callbacks have been eliminated by pre-allocating AudioBufferList and channel buffers in AudioGraphManager.init().
 
 ## Common Implementation Patterns
 
@@ -209,6 +257,19 @@ hrirManager.activatePreset(
 )
 ```
 
+### Adding Menu Items in MenuBarManager
+```swift
+// Device selection submenu
+let inputDeviceMenu = NSMenu()
+for device in deviceManager.inputDevices {
+    let item = NSMenuItem(title: device.name, action: #selector(selectInputDevice(_:)), keyEquivalent: "")
+    item.target = self
+    item.representedObject = device
+    item.state = (device.id == audioManager.inputDevice?.id) ? .on : .off
+    inputDeviceMenu.addItem(item)
+}
+```
+
 ## File Locations
 
 ### Application Support
@@ -219,7 +280,8 @@ hrirManager.activatePreset(
 ```
 MacHRIR/
 ├── MacHRIRApp.swift           # App entry point
-├── MenuBarManager.swift       # Menu bar UI (if menubar mode)
+├── AppDelegate.swift          # App delegate (creates MenuBarManager)
+├── MenuBarManager.swift       # Menu bar UI and coordinator
 ├── AudioGraphManager.swift    # CoreAudio dual-unit management
 ├── CircularBuffer.swift       # Ring buffer
 ├── AudioDevice.swift          # Device enumeration
@@ -247,11 +309,16 @@ MacHRIR/
 - **Cause**: Improper AudioBufferList allocation
 - **Fix**: Calculate size correctly for variable-length array (see pattern above)
 
+### Excessive transient mallocs in audio callbacks
+- **Cause**: Not pre-allocating buffers, using Swift Arrays in callbacks
+- **Fix**: Pre-allocate all buffers in init(), use UnsafeMutablePointer instead of Arrays
+
 ### No audio output
 - Check circular buffer is not underrunning
 - Verify sample rates match between input/output devices
 - Confirm correct element numbers (1=input, 0=output)
 - Check Console.app for CoreAudio errors
+- Verify buffering state allows processing to start
 
 ### HRIR file fails to load
 - Verify channel count = InputChannels × 2
@@ -264,24 +331,26 @@ MacHRIR/
 - **CPU**: <10% on Apple M1/M2 (single thread)
 - **Memory**: ~2-3MB for 7.1 (16 convolution engines)
 
-## Documentation Files
-
-- **PASSTHROUGH_SPEC.md**: Why AVAudioEngine doesn't work, detailed CoreAudio implementation
-- **MULTI_CHANNEL_ARCHITECTURE.md**: Complete multi-channel rendering architecture
-- **QUICK_REFERENCE.md**: Formulas and code snippets for HRIR processing
-- **BUILD_INSTRUCTIONS.md**: Detailed build steps and prerequisites
-- **TROUBLESHOOTING.md**: Common issues and solutions
-- **README.md**: User-facing documentation
-
 ## Development Notes
 
 ### Testing a Change
 1. Make code changes
 2. Build in Xcode (⌘R)
-3. Test with real audio (play music/video)
-4. Check level meters show activity
-5. Verify no glitches/dropouts
-6. Check Console.app for errors
+3. App appears in menu bar (waveform icon)
+4. Select input device (e.g., BlackHole 2ch)
+5. Select output device (e.g., headphones)
+6. Add/select HRIR preset
+7. Enable convolution
+8. Click Start
+9. Play audio and verify processing works
+10. Check Console.app for errors
+
+### Adding New Device Features
+When modifying device selection or audio unit setup:
+1. Always stop audio before reconfiguring
+2. Dispose and recreate audio units if changing devices
+3. Update channel counts before reinitializing
+4. Save settings via SettingsManager
 
 ### Adding New HRIR Mapping Format
 1. Add parsing logic to `HRIRChannelMap` in `VirtualSpeaker.swift`
@@ -294,3 +363,27 @@ MacHRIR/
 - Verify channel counts at each stage
 - Monitor circular buffer fill level
 - Use Instruments for CPU/memory profiling
+- Check Console.app for CoreAudio errors
+- Verify buffering state transitions correctly
+
+### Memory Management Best Practices
+- All audio callback buffers MUST be pre-allocated in init()
+- Use `UnsafeMutablePointer` instead of Swift Arrays in callbacks
+- Use memset for zeroing buffers
+- Check with Instruments Allocations tool to verify zero malloc in callbacks
+- Use FFTSetupManager to avoid redundant FFT setup allocations
+
+## Future Work
+
+### Planned C++ Migration
+See `CPP_MIGRATION_PLAN.md` for detailed plan to migrate performance-critical components:
+1. **Phase 1**: Lock-free CircularBuffer (C++ atomics instead of NSLock)
+2. **Phase 2**: Audio callbacks in pure C++ (eliminate Swift runtime overhead)
+
+This migration is planned but not yet implemented. Current code is pure Swift.
+
+### Potential Features
+- System aggregate device support (current branch: system_aggregate_device)
+- Automatic device reconnection on wake from sleep
+- Preset auto-switching based on input channel count
+- EQ integration (see HeSuVi_Reference/eq/ for presets)

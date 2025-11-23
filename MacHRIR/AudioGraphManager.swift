@@ -2,7 +2,7 @@
 //  AudioGraphManager.swift
 //  MacHRIR
 //
-//  Manages CoreAudio graph with multi-channel input support
+//  Manages CoreAudio graph with single aggregate device support
 //
 
 import Foundation
@@ -11,43 +11,40 @@ import AVFoundation
 import Combine
 import Accelerate
 
-/// Manages audio input/output using separate CoreAudio units with multi-channel support
+/// Manages audio I/O using a single HAL Audio Unit for an aggregate device
 class AudioGraphManager: ObservableObject {
 
     // MARK: - Published Properties
 
     @Published var isRunning: Bool = false
-    @Published var inputDevice: AudioDevice?
-    @Published var outputDevice: AudioDevice?
+    @Published var aggregateDevice: AudioDevice?
     @Published var errorMessage: String?
+    
     // MARK: - Private Properties
 
-    fileprivate var inputUnit: AudioUnit?
-    fileprivate var outputUnit: AudioUnit?
-    fileprivate let circularBuffer: CircularBuffer
-    private let bufferSize: Int = 65536
-
-    fileprivate var inputChannelCount: UInt32 = 2
+    fileprivate var audioUnit: AudioUnit?
+    
+    // Device properties
+    fileprivate var inputChannelCount: UInt32 = 0
     fileprivate var outputChannelCount: UInt32 = 2
+    
+    // NEW: Track which output channels to use
+    fileprivate var selectedOutputChannelRange: Range<Int>?
+    
     fileprivate var currentSampleRate: Double = 48000.0
 
     // Pre-allocated buffers for multi-channel processing
-
     fileprivate let maxFramesPerCallback: Int = 4096
     fileprivate let maxChannels: Int = 16  // Support up to 16 channels
     
-    // Buffering state
-    fileprivate var isBuffering: Bool = true
-
     // Multi-channel buffers using UnsafeMutablePointer for zero-allocation real-time processing
-    // We use UnsafeMutablePointer<UnsafeMutablePointer<Float>> to avoid Swift Array overhead in callbacks
     fileprivate var inputChannelBufferPtrs: UnsafeMutablePointer<UnsafeMutablePointer<Float>>?
     fileprivate var outputStereoLeftPtr: UnsafeMutablePointer<Float>!
     fileprivate var outputStereoRightPtr: UnsafeMutablePointer<Float>!
     
-    // Pre-allocated AudioBufferList for Input Callback
+    // Pre-allocated AudioBufferList for Input Callback (Element 1)
     fileprivate var inputAudioBufferListPtr: UnsafeMutableRawPointer?
-    // Array of pointers to raw audio buffers (UnsafeMutablePointer<UnsafeMutableRawPointer>)
+    // Array of pointers to raw audio buffers
     fileprivate var inputAudioBuffersPtr: UnsafeMutablePointer<UnsafeMutableRawPointer>?
 
     // Reference to HRIR manager for convolution
@@ -56,9 +53,7 @@ class AudioGraphManager: ObservableObject {
     // MARK: - Initialization
 
     init() {
-        self.circularBuffer = CircularBuffer(size: bufferSize)
-
-        // Pre-allocate AudioBufferList for input callback
+        // Pre-allocate AudioBufferList for input rendering
         let bufferListSize = MemoryLayout<AudioBufferList>.size +
                              max(0, maxChannels - 1) * MemoryLayout<AudioBuffer>.size
         
@@ -68,7 +63,6 @@ class AudioGraphManager: ObservableObject {
         )
         
         // Pre-allocate per-channel audio data buffers (raw bytes for AudioUnit)
-        // Allocate the array of pointers first
         inputAudioBuffersPtr = UnsafeMutablePointer<UnsafeMutableRawPointer>.allocate(capacity: maxChannels)
         
         for i in 0..<maxChannels {
@@ -81,8 +75,7 @@ class AudioGraphManager: ObservableObject {
             inputAudioBuffersPtr![i] = buffer
         }
 
-        // Pre-allocate per-channel buffers using UnsafeMutablePointer
-        // Allocate the array of pointers first
+        // Pre-allocate per-channel buffers using UnsafeMutablePointer for processing
         inputChannelBufferPtrs = UnsafeMutablePointer<UnsafeMutablePointer<Float>>.allocate(capacity: maxChannels)
         
         for i in 0..<maxChannels {
@@ -101,6 +94,7 @@ class AudioGraphManager: ObservableObject {
 
     deinit {
         stop()
+        
         // Deallocate Input AudioBufferList
         inputAudioBufferListPtr?.deallocate()
         
@@ -128,32 +122,30 @@ class AudioGraphManager: ObservableObject {
 
     // MARK: - Public Methods
 
-    /// Start the audio engine with selected devices
+    /// Start the audio engine with selected aggregate device
     func start() {
-        guard let inputDevice = inputDevice, let outputDevice = outputDevice else {
-            errorMessage = "Please select both input and output devices"
+        guard let device = aggregateDevice else {
+            errorMessage = "Please select an aggregate device"
             return
         }
         
-        // Validate that devices still exist in the system
+        // Validate that device still exists
         let allDevices = AudioDeviceManager.getAllDevices()
-        guard allDevices.contains(where: { $0.id == inputDevice.id }) else {
-            errorMessage = "Input device '\(inputDevice.name)' is no longer available"
-            return
-        }
-        guard allDevices.contains(where: { $0.id == outputDevice.id }) else {
-            errorMessage = "Output device '\(outputDevice.name)' is no longer available"
+        guard allDevices.contains(where: { $0.id == device.id }) else {
+            errorMessage = "Device '\(device.name)' is no longer available"
             return
         }
 
         stop()
 
         do {
-            try setupInputUnit(device: inputDevice)
-            try setupOutputUnit(device: outputDevice)
+            try setupAudioUnit(device: device, outputChannelRange: selectedOutputChannelRange)
 
             // Notify HRIR manager of the input layout
+            // We assume the first N channels of the aggregate device are the input channels
             if let hrirManager = hrirManager, let activePreset = hrirManager.activePreset {
+                // Heuristic: Use the device's total input channels as the source layout
+                // Users should configure aggregate device to have multi-channel input first
                 let inputLayout = InputLayout.detect(channelCount: Int(inputChannelCount))
                 hrirManager.activatePreset(
                     activePreset,
@@ -162,16 +154,9 @@ class AudioGraphManager: ObservableObject {
                 )
             }
 
-            circularBuffer.reset()
-
-            var status = AudioOutputUnitStart(inputUnit!)
+            let status = AudioOutputUnitStart(audioUnit!)
             guard status == noErr else {
-                throw AudioError.startFailed(status, "Failed to start input unit")
-            }
-
-            status = AudioOutputUnitStart(outputUnit!)
-            guard status == noErr else {
-                throw AudioError.startFailed(status, "Failed to start output unit")
+                throw AudioError.startFailed(status, "Failed to start audio unit")
             }
 
             DispatchQueue.main.async {
@@ -189,50 +174,46 @@ class AudioGraphManager: ObservableObject {
 
     /// Stop the audio engine
     func stop() {
-        if let input = inputUnit {
-            AudioOutputUnitStop(input)
-            AudioUnitUninitialize(input)
-            AudioComponentInstanceDispose(input)
-            inputUnit = nil
+        if let unit = audioUnit {
+            AudioOutputUnitStop(unit)
+            AudioUnitUninitialize(unit)
+            AudioComponentInstanceDispose(unit)
+            audioUnit = nil
         }
-
-        if let output = outputUnit {
-            AudioOutputUnitStop(output)
-            AudioUnitUninitialize(output)
-            AudioComponentInstanceDispose(output)
-            outputUnit = nil
-        }
-
-        circularBuffer.reset()
 
         DispatchQueue.main.async {
             self.isRunning = false
         }
     }
+    
+    /// Setup with aggregate device and optional output channel specification
+    func setupAudioUnit(
+        aggregateDevice: AudioDevice,
+        outputChannelRange: Range<Int>? = nil
+    ) throws {
+        self.aggregateDevice = aggregateDevice
+        self.selectedOutputChannelRange = outputChannelRange
+        try setupAudioUnit(device: aggregateDevice, outputChannelRange: outputChannelRange)
+    }
 
-    /// Select input device
-    func selectInputDevice(_ device: AudioDevice) {
-        inputDevice = device
+    /// Change output routing without stopping audio
+    func setOutputChannels(_ range: Range<Int>) {
+        // Thread-safe update of output channel range
+        // No need to reinitialize audio unit!
+        selectedOutputChannelRange = range
+    }
+
+    /// Select aggregate device
+    func selectAggregateDevice(_ device: AudioDevice) {
+        aggregateDevice = device
         if isRunning {
             start()
         }
     }
-
-    /// Select output device
-    func selectOutputDevice(_ device: AudioDevice) {
-        outputDevice = device
-        if isRunning {
-            start()
-        }
-    }
-    
-    // MARK: - Buffer Management
-    
-
 
     // MARK: - Private Setup Methods
 
-    private func setupInputUnit(device: AudioDevice) throws {
+    private func setupAudioUnit(device: AudioDevice, outputChannelRange: Range<Int>?) throws {
         var componentDesc = AudioComponentDescription(
             componentType: kAudioUnitType_Output,
             componentSubType: kAudioUnitSubType_HALOutput,
@@ -247,39 +228,40 @@ class AudioGraphManager: ObservableObject {
 
         var unit: AudioUnit?
         var status = AudioComponentInstanceNew(component, &unit)
-        guard status == noErr, let inputUnit = unit else {
+        guard status == noErr, let audioUnit = unit else {
             throw AudioError.instantiationFailed(status)
         }
 
+        // Enable IO for both Input (Element 1) and Output (Element 0)
         var enableIO: UInt32 = 1
         status = AudioUnitSetProperty(
-            inputUnit,
+            audioUnit,
             kAudioOutputUnitProperty_EnableIO,
             kAudioUnitScope_Input,
-            1,
+            1, // Input Element
             &enableIO,
             UInt32(MemoryLayout<UInt32>.size)
         )
         guard status == noErr else {
-            throw AudioError.propertySetFailed(status, "Failed to enable input")
+            throw AudioError.propertySetFailed(status, "Failed to enable input on element 1")
         }
 
-        var disableIO: UInt32 = 0
         status = AudioUnitSetProperty(
-            inputUnit,
+            audioUnit,
             kAudioOutputUnitProperty_EnableIO,
             kAudioUnitScope_Output,
-            0,
-            &disableIO,
+            0, // Output Element
+            &enableIO,
             UInt32(MemoryLayout<UInt32>.size)
         )
         guard status == noErr else {
-            throw AudioError.propertySetFailed(status, "Failed to disable output")
+            throw AudioError.propertySetFailed(status, "Failed to enable output on element 0")
         }
 
+        // Set the Current Device
         var deviceID = device.id
         status = AudioUnitSetProperty(
-            inputUnit,
+            audioUnit,
             kAudioOutputUnitProperty_CurrentDevice,
             kAudioUnitScope_Global,
             0,
@@ -290,10 +272,13 @@ class AudioGraphManager: ObservableObject {
             throw AudioError.deviceSetFailed(status)
         }
 
+        // Get Device Format to determine sample rate and channel counts
         var deviceFormat = AudioStreamBasicDescription()
         var size = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+        
+        // Check Input Scope of Element 1 (Device Input)
         status = AudioUnitGetProperty(
-            inputUnit,
+            audioUnit,
             kAudioUnitProperty_StreamFormat,
             kAudioUnitScope_Input,
             1,
@@ -304,147 +289,93 @@ class AudioGraphManager: ObservableObject {
             throw AudioError.formatGetFailed(status)
         }
 
-        inputChannelCount = deviceFormat.mChannelsPerFrame
         currentSampleRate = deviceFormat.mSampleRate
+        inputChannelCount = deviceFormat.mChannelsPerFrame
         
-        print("[AudioGraph] Input device: \(device.name), Channels: \(inputChannelCount), Sample Rate: \(currentSampleRate)")
+        // Check Output Scope of Element 0 (Device Output)
+        // We need to know the output channel count to map our stereo output correctly
+        var outputDeviceFormat = AudioStreamBasicDescription()
+        status = AudioUnitGetProperty(
+            audioUnit,
+            kAudioUnitProperty_StreamFormat,
+            kAudioUnitScope_Output,
+            0,
+            &outputDeviceFormat,
+            &size
+        )
+        outputChannelCount = outputDeviceFormat.mChannelsPerFrame
         
+        print("[AudioGraph] Aggregate Device: \(device.name)")
+        print("  Input Channels: \(inputChannelCount)")
+        print("  Output Channels: \(outputChannelCount)")
+        print("  Sample Rate: \(currentSampleRate)")
 
-
-        var streamFormat = AudioStreamBasicDescription(
-            mSampleRate: deviceFormat.mSampleRate,
+        // Set Stream Format for Input (Element 1 Output Scope)
+        // This is the format we want the AU to provide data TO us
+        var inputStreamFormat = AudioStreamBasicDescription(
+            mSampleRate: currentSampleRate,
             mFormatID: kAudioFormatLinearPCM,
-            mFormatFlags: kAudioFormatFlagIsFloat |
-                          kAudioFormatFlagIsPacked |
-                          kAudioFormatFlagIsNonInterleaved,
+            mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked | kAudioFormatFlagIsNonInterleaved,
             mBytesPerPacket: 4,
             mFramesPerPacket: 1,
             mBytesPerFrame: 4,
-            mChannelsPerFrame: deviceFormat.mChannelsPerFrame,
+            mChannelsPerFrame: inputChannelCount, // Match device input channels
             mBitsPerChannel: 32,
             mReserved: 0
         )
 
         status = AudioUnitSetProperty(
-            inputUnit,
+            audioUnit,
             kAudioUnitProperty_StreamFormat,
             kAudioUnitScope_Output,
             1,
-            &streamFormat,
+            &inputStreamFormat,
             UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
         )
         guard status == noErr else {
             throw AudioError.formatSetFailed(status)
         }
 
-        let selfPtr = Unmanaged.passUnretained(self).toOpaque()
-        var callback = AURenderCallbackStruct(
-            inputProc: inputRenderCallback,
-            inputProcRefCon: selfPtr
-        )
-
-        status = AudioUnitSetProperty(
-            inputUnit,
-            kAudioOutputUnitProperty_SetInputCallback,
-            kAudioUnitScope_Global,
-            0,
-            &callback,
-            UInt32(MemoryLayout<AURenderCallbackStruct>.size)
-        )
-        guard status == noErr else {
-            throw AudioError.callbackSetFailed(status)
-        }
-
-        status = AudioUnitInitialize(inputUnit)
-        guard status == noErr else {
-            throw AudioError.initializationFailed(status, "Input unit")
-        }
-
-        self.inputUnit = inputUnit
-    }
-
-    private func setupOutputUnit(device: AudioDevice) throws {
-        var componentDesc = AudioComponentDescription(
-            componentType: kAudioUnitType_Output,
-            componentSubType: kAudioUnitSubType_HALOutput,
-            componentManufacturer: kAudioUnitManufacturer_Apple,
-            componentFlags: 0,
-            componentFlagsMask: 0
-        )
-
-        guard let component = AudioComponentFindNext(nil, &componentDesc) else {
-            throw AudioError.componentNotFound
-        }
-
-        var unit: AudioUnit?
-        var status = AudioComponentInstanceNew(component, &unit)
-        guard status == noErr, let outputUnit = unit else {
-            throw AudioError.instantiationFailed(status)
-        }
-
-        var deviceID = device.id
-        status = AudioUnitSetProperty(
-            outputUnit,
-            kAudioOutputUnitProperty_CurrentDevice,
-            kAudioUnitScope_Global,
-            0,
-            &deviceID,
-            UInt32(MemoryLayout<AudioDeviceID>.size)
-        )
-        guard status == noErr else {
-            throw AudioError.deviceSetFailed(status)
-        }
-
-        var deviceFormat = AudioStreamBasicDescription()
-        var size = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
-        status = AudioUnitGetProperty(
-            outputUnit,
-            kAudioUnitProperty_StreamFormat,
-            kAudioUnitScope_Output,
-            0,
-            &deviceFormat,
-            &size
-        )
-        guard status == noErr else {
-            throw AudioError.formatGetFailed(status)
-        }
-
-        outputChannelCount = deviceFormat.mChannelsPerFrame
-
-        var streamFormat = AudioStreamBasicDescription(
-            mSampleRate: deviceFormat.mSampleRate,
+        // Set Stream Format for Output (Element 0 Input Scope)
+        // This is the format we will provide data FROM
+        // We will provide stereo (or match output channels if we want to map directly)
+        // But our HRIR engine produces stereo. We'll map that to the first 2 channels of the output.
+        // To keep it simple, we tell the AU we are providing the same number of channels as the device expects,
+        // but we'll only fill the first 2.
+        
+        var outputStreamFormat = AudioStreamBasicDescription(
+            mSampleRate: currentSampleRate,
             mFormatID: kAudioFormatLinearPCM,
-            mFormatFlags: kAudioFormatFlagIsFloat |
-                          kAudioFormatFlagIsPacked |
-                          kAudioFormatFlagIsNonInterleaved,
+            mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked | kAudioFormatFlagIsNonInterleaved,
             mBytesPerPacket: 4,
             mFramesPerPacket: 1,
             mBytesPerFrame: 4,
-            mChannelsPerFrame: deviceFormat.mChannelsPerFrame,
+            mChannelsPerFrame: outputChannelCount, // Match device output channels
             mBitsPerChannel: 32,
             mReserved: 0
         )
 
         status = AudioUnitSetProperty(
-            outputUnit,
+            audioUnit,
             kAudioUnitProperty_StreamFormat,
             kAudioUnitScope_Input,
             0,
-            &streamFormat,
+            &outputStreamFormat,
             UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
         )
         guard status == noErr else {
             throw AudioError.formatSetFailed(status)
         }
 
+        // Set Render Callback
         let selfPtr = Unmanaged.passUnretained(self).toOpaque()
         var callback = AURenderCallbackStruct(
-            inputProc: outputRenderCallback,
+            inputProc: renderCallback,
             inputProcRefCon: selfPtr
         )
 
         status = AudioUnitSetProperty(
-            outputUnit,
+            audioUnit,
             kAudioUnitProperty_SetRenderCallback,
             kAudioUnitScope_Input,
             0,
@@ -455,19 +386,20 @@ class AudioGraphManager: ObservableObject {
             throw AudioError.callbackSetFailed(status)
         }
 
-        status = AudioUnitInitialize(outputUnit)
+        // Initialize
+        status = AudioUnitInitialize(audioUnit)
         guard status == noErr else {
-            throw AudioError.initializationFailed(status, "Output unit")
+            throw AudioError.initializationFailed(status, "Aggregate Audio Unit")
         }
 
-        self.outputUnit = outputUnit
+        self.audioUnit = audioUnit
     }
 }
 
-// MARK: - Audio Callbacks
+// MARK: - Audio Callback
 
-/// Input callback - pulls audio from input device and writes to circular buffer
-private func inputRenderCallback(
+/// Single render callback for pass-through processing
+private func renderCallback(
     inRefCon: UnsafeMutableRawPointer,
     ioActionFlags: UnsafeMutablePointer<AudioUnitRenderActionFlags>,
     inTimeStamp: UnsafePointer<AudioTimeStamp>,
@@ -478,196 +410,126 @@ private func inputRenderCallback(
 
     let manager = Unmanaged<AudioGraphManager>.fromOpaque(inRefCon).takeUnretainedValue()
 
-    guard let inputUnit = manager.inputUnit else { return noErr }
-    
-    guard let audioBufferListPtr = manager.inputAudioBufferListPtr else { return noErr }
-    
-    let channelCount = Int(manager.inputChannelCount)
+    guard let audioUnit = manager.audioUnit,
+          let ioData = ioData,
+          let inputBufferListPtr = manager.inputAudioBufferListPtr else {
+        return noErr
+    }
+
     let frameCount = Int(inNumberFrames)
-    let bytesPerChannel = frameCount * MemoryLayout<Float>.size
     
-    // Validate we don't exceed pre-allocated size
-    guard frameCount <= manager.maxFramesPerCallback,
-          channelCount <= manager.maxChannels else {
-        return kAudioUnitErr_TooManyFramesToProcess
+    // 1. Pull Input Data from Element 1
+    // ---------------------------------
+    
+    // Configure the pre-allocated AudioBufferList for input
+    let inputBufferList = inputBufferListPtr.assumingMemoryBound(to: AudioBufferList.self)
+    let inputChannelCount = Int(manager.inputChannelCount)
+    
+    // Safety check
+    if frameCount > manager.maxFramesPerCallback || inputChannelCount > manager.maxChannels {
+         return kAudioUnitErr_TooManyFramesToProcess
     }
     
-    // Configure the pre-allocated AudioBufferList
-    let audioBufferList = audioBufferListPtr.assumingMemoryBound(to: AudioBufferList.self)
-    audioBufferList.pointee.mNumberBuffers = UInt32(channelCount)
+    inputBufferList.pointee.mNumberBuffers = UInt32(inputChannelCount)
     
-    // Configure each buffer to point to our pre-allocated memory
-    // Use withUnsafeMutablePointer to avoid dangling pointer warning
     if let inputBuffers = manager.inputAudioBuffersPtr {
-        withUnsafeMutablePointer(to: &audioBufferList.pointee.mBuffers) { buffersPtr in
-            let bufferPtr = UnsafeMutableRawPointer(buffersPtr)
-                .assumingMemoryBound(to: AudioBuffer.self)
-            
-            for i in 0..<channelCount {
+        withUnsafeMutablePointer(to: &inputBufferList.pointee.mBuffers) { buffersPtr in
+            let bufferPtr = UnsafeMutableRawPointer(buffersPtr).assumingMemoryBound(to: AudioBuffer.self)
+            for i in 0..<inputChannelCount {
                 let buffer = bufferPtr.advanced(by: i)
                 buffer.pointee.mNumberChannels = 1
-                buffer.pointee.mDataByteSize = UInt32(bytesPerChannel)
+                buffer.pointee.mDataByteSize = UInt32(frameCount * MemoryLayout<Float>.size)
                 buffer.pointee.mData = inputBuffers[i]
             }
         }
     }
-
+    
+    var actionFlags: AudioUnitRenderActionFlags = []
+    
     let status = AudioUnitRender(
-        inputUnit,
-        ioActionFlags,
+        audioUnit,
+        &actionFlags,
         inTimeStamp,
-        1,
+        1, // Input Element
         inNumberFrames,
-        audioBufferList
+        inputBufferList
     )
-
-    if status == noErr {
-        // Write sequentially to circular buffer (no interleaving)
-        // This avoids the need for an intermediate interleave buffer and vDSP calls
-        // Write sequentially to circular buffer (no interleaving)
-        if let inputBuffers = manager.inputAudioBuffersPtr {
-            for i in 0..<channelCount {
-                manager.circularBuffer.write(
-                    data: inputBuffers[i],
-                    size: bytesPerChannel
-                )
+    
+    if status != noErr {
+        return status
+    }
+    
+    // 2. Process Audio (Convolution)
+    // ------------------------------
+    
+    // Map input buffers to Float pointers
+    if let inputBuffers = manager.inputAudioBuffersPtr,
+       let channelPtrs = manager.inputChannelBufferPtrs {
+        for i in 0..<inputChannelCount {
+            // Cast raw void* to Float*
+            let floatPtr = inputBuffers[i].assumingMemoryBound(to: Float.self)
+            channelPtrs[i] = floatPtr
+        }
+    }
+    
+    let shouldProcess = manager.hrirManager?.isConvolutionActive ?? false
+    
+    if shouldProcess, let channelPtrs = manager.inputChannelBufferPtrs {
+        manager.hrirManager?.processAudio(
+            inputPtrs: channelPtrs,
+            inputCount: inputChannelCount,
+            leftOutput: manager.outputStereoLeftPtr,
+            rightOutput: manager.outputStereoRightPtr,
+            frameCount: frameCount
+        )
+    } else {
+        // Passthrough / Mixdown
+        memset(manager.outputStereoLeftPtr, 0, frameCount * 4)
+        memset(manager.outputStereoRightPtr, 0, frameCount * 4)
+        
+        if inputChannelCount > 0, let channelPtrs = manager.inputChannelBufferPtrs {
+            let src = channelPtrs[0]
+            memcpy(manager.outputStereoLeftPtr, src, frameCount * 4)
+            
+            if inputChannelCount >= 2 {
+                let src2 = channelPtrs[1]
+                memcpy(manager.outputStereoRightPtr, src2, frameCount * 4)
+            } else {
+                memcpy(manager.outputStereoRightPtr, src, frameCount * 4)
             }
         }
     }
-
-    return noErr
-}
-
-/// Output callback - reads from circular buffer and provides to output device
-private func outputRenderCallback(
-    inRefCon: UnsafeMutableRawPointer,
-    ioActionFlags: UnsafeMutablePointer<AudioUnitRenderActionFlags>,
-    inTimeStamp: UnsafePointer<AudioTimeStamp>,
-    inBusNumber: UInt32,
-    inNumberFrames: UInt32,
-    ioData: UnsafeMutablePointer<AudioBufferList>?
-) -> OSStatus {
-
-    let manager = Unmanaged<AudioGraphManager>.fromOpaque(inRefCon).takeUnretainedValue()
-
-    guard let bufferList = ioData else { return noErr }
-
-    let outputChannelCount = Int(bufferList.pointee.mNumberBuffers)
-    let frameCount = Int(inNumberFrames)
-
-    // Use withUnsafeMutablePointer to avoid dangling pointer warning
-    // Wrap all buffer access in this scope
-    withUnsafeMutablePointer(to: &bufferList.pointee.mBuffers) { buffersPtr in
-        let bufferPtr = UnsafeMutableRawPointer(buffersPtr)
-            .assumingMemoryBound(to: AudioBuffer.self)
+    
+    // 3. Write Output Data to Element 0
+    // ---------------------------------
+    
+    let outputChannelCount = Int(ioData.pointee.mNumberBuffers)
+    
+    withUnsafeMutablePointer(to: &ioData.pointee.mBuffers) { buffersPtr in
+        let bufferPtr = UnsafeMutableRawPointer(buffersPtr).assumingMemoryBound(to: AudioBuffer.self)
         
-        // Validate frame count
-        guard frameCount <= manager.maxFramesPerCallback else {
-            // Fill with silence and return
-            for i in 0..<outputChannelCount {
-                let buffer = bufferPtr.advanced(by: i)
-                if let data = buffer.pointee.mData {
-                    memset(data, 0, Int(buffer.pointee.mDataByteSize))
-                }
-            }
-            return
-        }
-
-        let inputChannelCount = Int(manager.inputChannelCount)
-        let totalBytesNeeded = frameCount * inputChannelCount * 4
-        
-        // Buffering Logic
-        let playbackThreshold = 512 * inputChannelCount * 4
-        
-        if manager.isBuffering {
-            if manager.circularBuffer.availableReadSpace() >= playbackThreshold {
-                manager.isBuffering = false
-            } else {
-                // Output silence
-                for i in 0..<outputChannelCount {
-                    let buffer = bufferPtr.advanced(by: i)
-                    if let data = buffer.pointee.mData {
-                        memset(data, 0, Int(buffer.pointee.mDataByteSize))
-                    }
-                }
-                return
-            }
-        }
-
-        // Check for underrun
-        if manager.circularBuffer.availableReadSpace() < totalBytesNeeded {
-            manager.isBuffering = true
-            // Output silence
-            for i in 0..<outputChannelCount {
-                let buffer = bufferPtr.advanced(by: i)
-                if let data = buffer.pointee.mData {
-                    memset(data, 0, Int(buffer.pointee.mDataByteSize))
-                }
-            }
-            return
-        }
-
-        // Read sequential data from circular buffer into inputChannelBufferPtrs
-        // This matches the sequential write in inputRenderCallback
-        // Read sequential data from circular buffer into inputChannelBufferPtrs
-        // This matches the sequential write in inputRenderCallback
-        if let channelPtrs = manager.inputChannelBufferPtrs {
-            for i in 0..<inputChannelCount {
-                // Safety check for channel count
-                if i < manager.maxChannels {
-                    let dstPtr = channelPtrs[i]
-                    let byteSize = frameCount * MemoryLayout<Float>.size
-                    manager.circularBuffer.read(into: dstPtr, size: byteSize)
-                }
-            }
-        }
-
-        // Process through HRIR convolution if enabled
-        let shouldProcess = manager.hrirManager?.convolutionEnabled ?? false
-
-        if shouldProcess, let channelPtrs = manager.inputChannelBufferPtrs {
-            // Pass input channel pointers to HRIR manager (zero-copy, zero-allocation)
-            manager.hrirManager?.processAudio(
-                inputPtrs: channelPtrs,
-                inputCount: inputChannelCount,
-                leftOutput: manager.outputStereoLeftPtr,
-                rightOutput: manager.outputStereoRightPtr,
-                frameCount: frameCount
-            )
-        } else {
-            // PASSTHROUGH: Mix down to stereo
-            // Input is already in inputChannelBufferPtrs (non-interleaved)
-            
-            // Reset output buffers
-            memset(manager.outputStereoLeftPtr, 0, frameCount * 4)
-            memset(manager.outputStereoRightPtr, 0, frameCount * 4)
-            
-            // Simple mix: Left = Ch1, Right = Ch2 (if exists)
-            // Or mono: Left = Ch1, Right = Ch1
-            
-            if inputChannelCount > 0, let channelPtrs = manager.inputChannelBufferPtrs {
-                let src = channelPtrs[0]
-                memcpy(manager.outputStereoLeftPtr, src, frameCount * 4)
-                
-                if inputChannelCount >= 2 {
-                    let src2 = channelPtrs[1]
-                    memcpy(manager.outputStereoRightPtr, src2, frameCount * 4)
-                } else {
-                    // Mono -> Stereo
-                    memcpy(manager.outputStereoRightPtr, src, frameCount * 4)
-                }
-            }
-        }
-
-        // Write processed audio to output buffers
-        for i in 0..<min(outputChannelCount, 2) {
+        // Zero ALL output channels first
+        for i in 0..<outputChannelCount {
             let buffer = bufferPtr.advanced(by: i)
             if let data = buffer.pointee.mData {
-                let samples = data.assumingMemoryBound(to: Float.self)
-                let sourcePtr = (i == 0) ? manager.outputStereoLeftPtr : manager.outputStereoRightPtr
+                 memset(data, 0, frameCount * 4)
+            }
+        }
+        
+        // Write stereo output to SELECTED channels only
+        if let channelRange = manager.selectedOutputChannelRange {
+            let leftChannel = channelRange.lowerBound
+            let rightChannel = leftChannel + 1
+            
+            if rightChannel < outputChannelCount {
+                let leftBuffer = bufferPtr.advanced(by: leftChannel)
+                let rightBuffer = bufferPtr.advanced(by: rightChannel)
                 
-                let byteCount = frameCount * MemoryLayout<Float>.size
-                memcpy(samples, sourcePtr, byteCount)
+                if let leftData = leftBuffer.pointee.mData,
+                   let rightData = rightBuffer.pointee.mData {
+                    memcpy(leftData, manager.outputStereoLeftPtr, frameCount * 4)
+                    memcpy(rightData, manager.outputStereoRightPtr, frameCount * 4)
+                }
             }
         }
     }

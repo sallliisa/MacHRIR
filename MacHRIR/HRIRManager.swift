@@ -43,7 +43,14 @@ class HRIRManager: ObservableObject {
 
     @Published var presets: [HRIRPreset] = []
     @Published var activePreset: HRIRPreset?
-    @Published var convolutionEnabled: Bool = false
+    @Published var convolutionEnabled: Bool = false {
+        didSet {
+            isConvolutionActive = convolutionEnabled
+        }
+    }
+    
+    /// Fast-path boolean for audio thread access to avoid @Published overhead
+    public var isConvolutionActive: Bool = false
     @Published var errorMessage: String?
     @Published var currentInputLayout: InputLayout = .stereo
     @Published var currentHRIRMap: HRIRChannelMap?

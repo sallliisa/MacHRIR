@@ -10,8 +10,8 @@ import CoreAudio
 
 /// Application settings
 struct AppSettings: Codable {
-    var selectedInputDeviceID: UInt32?
-    var selectedOutputDeviceID: UInt32?
+    var aggregateDeviceID: UInt32?
+    var selectedOutputDeviceID: UInt32? // NEW: ID of the physical output device within the aggregate
     var activePresetID: UUID?
     var convolutionEnabled: Bool
     var autoStart: Bool
@@ -20,7 +20,7 @@ struct AppSettings: Codable {
 
     static var `default`: AppSettings {
         return AppSettings(
-            selectedInputDeviceID: nil,
+            aggregateDeviceID: nil,
             selectedOutputDeviceID: nil,
             activePresetID: nil,
             convolutionEnabled: false,
@@ -33,6 +33,9 @@ struct AppSettings: Codable {
 
 /// Manages application settings persistence using UserDefaults
 class SettingsManager {
+    
+    // Singleton instance for easy access
+    static let shared = SettingsManager()
 
     private let defaults = UserDefaults.standard
     private let settingsKey = "MacHRIR.AppSettings"
@@ -50,25 +53,26 @@ class SettingsManager {
             return .default
         }
         
-        guard let settings = try? JSONDecoder().decode(AppSettings.self, from: data) else {
-            print("[Settings] Failed to decode settings from UserDefaults")
-            return .default
+        // Try to decode new schema
+        if let settings = try? JSONDecoder().decode(AppSettings.self, from: data) {
+            print("[Settings] Loaded settings:")
+            print("  - Aggregate Device ID: \(settings.aggregateDeviceID?.description ?? "nil")")
+            print("  - Output Device ID: \(settings.selectedOutputDeviceID?.description ?? "nil")")
+            print("  - Active Preset ID: \(settings.activePresetID?.uuidString ?? "nil")")
+            print("  - Convolution Enabled: \(settings.convolutionEnabled)")
+            print("  - Auto Start: \(settings.autoStart)")
+            return settings
         }
         
-        print("[Settings] Loaded settings:")
-        print("  - Input Device ID: \(settings.selectedInputDeviceID?.description ?? "nil")")
-        print("  - Output Device ID: \(settings.selectedOutputDeviceID?.description ?? "nil")")
-        print("  - Active Preset ID: \(settings.activePresetID?.uuidString ?? "nil")")
-        print("  - Convolution Enabled: \(settings.convolutionEnabled)")
-        print("  - Auto Start: \(settings.autoStart)")
-
-        return settings
+        // Migration: If we fail to decode, it might be the old schema.
+        print("[Settings] Failed to decode settings (possible schema mismatch). Resetting to defaults.")
+        return .default
     }
 
     /// Save settings to UserDefaults
     func saveSettings(_ settings: AppSettings) {
         print("[Settings] Saving settings to UserDefaults:")
-        print("  - Input Device ID: \(settings.selectedInputDeviceID?.description ?? "nil")")
+        print("  - Aggregate Device ID: \(settings.aggregateDeviceID?.description ?? "nil")")
         print("  - Output Device ID: \(settings.selectedOutputDeviceID?.description ?? "nil")")
         print("  - Active Preset ID: \(settings.activePresetID?.uuidString ?? "nil")")
         print("  - Convolution Enabled: \(settings.convolutionEnabled)")
@@ -87,5 +91,27 @@ class SettingsManager {
         } else {
             print("[Settings] Warning: synchronize() returned false")
         }
+    }
+    
+    // MARK: - Helper Methods
+    
+    func setAggregateDevice(_ deviceID: AudioDeviceID) {
+        var settings = loadSettings()
+        settings.aggregateDeviceID = deviceID
+        saveSettings(settings)
+    }
+    
+    func getAggregateDevice() -> AudioDeviceID? {
+        return loadSettings().aggregateDeviceID
+    }
+    
+    func setOutputDevice(_ deviceID: AudioDeviceID) {
+        var settings = loadSettings()
+        settings.selectedOutputDeviceID = deviceID
+        saveSettings(settings)
+    }
+    
+    func getOutputDevice() -> AudioDeviceID? {
+        return loadSettings().selectedOutputDeviceID
     }
 }
