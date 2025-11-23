@@ -19,6 +19,10 @@ class MenuBarManager: NSObject, NSMenuDelegate {
     private let deviceManager = AudioDeviceManager.shared
     private let settingsManager = SettingsManager()
     
+    #if DEBUG_STATS_WINDOW
+    private var statsWindowController: StatsWindowController?
+    #endif
+    
     private var cancellables = Set<AnyCancellable>()
     private var isInitialized = false
     private var isRestoringState = false
@@ -221,6 +225,16 @@ class MenuBarManager: NSObject, NSMenuDelegate {
         
         menu.addItem(NSMenuItem.separator())
         
+        // --- Debug Tools ---
+        #if DEBUG_STATS_WINDOW
+        let statsTitle = (statsWindowController?.window?.isVisible ?? false) ? "Hide Stats Window" : "Show Stats Window"
+        let statsItem = NSMenuItem(title: statsTitle, action: #selector(toggleStatsWindow), keyEquivalent: "")
+        statsItem.target = self
+        menu.addItem(statsItem)
+        
+        menu.addItem(NSMenuItem.separator())
+        #endif
+        
         // --- Application Management ---
         let aboutItem = NSMenuItem(title: "About MacHRIR", action: #selector(showAbout), keyEquivalent: "")
         aboutItem.target = self
@@ -293,6 +307,20 @@ class MenuBarManager: NSObject, NSMenuDelegate {
             audioManager.start()
         }
     }
+    
+    #if DEBUG_STATS_WINDOW
+    @objc private func toggleStatsWindow() {
+        if let controller = statsWindowController, controller.window?.isVisible ?? false {
+            controller.close()
+        } else {
+            if statsWindowController == nil {
+                statsWindowController = StatsWindowController(audioManager: audioManager)
+            }
+            statsWindowController?.showWindow(nil)
+        }
+        updateMenu()
+    }
+    #endif
     
     @objc private func showAbout() {
         NSApp.orderFrontStandardAboutPanel(nil)

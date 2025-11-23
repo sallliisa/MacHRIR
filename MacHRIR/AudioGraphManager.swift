@@ -20,6 +20,24 @@ class AudioGraphManager: ObservableObject {
     @Published var inputDevice: AudioDevice?
     @Published var outputDevice: AudioDevice?
     @Published var errorMessage: String?
+    
+    // MARK: - Buffer Stats
+    
+    /// Buffer statistics for monitoring
+    struct BufferStats {
+        let capacity: Int
+        let bytesUsed: Int
+        let bytesAvailable: Int
+        let percentFull: Double
+        let isBuffering: Bool
+        
+        // Drift monitoring
+        let underrunCount: Int
+        let averageFillLevel: Double
+        let minFillLevel: Int
+        let maxFillLevel: Int
+    }
+    
     // MARK: - Private Properties
 
     fileprivate var inputUnit: AudioUnit?
@@ -38,6 +56,13 @@ class AudioGraphManager: ObservableObject {
     
     // Buffering state
     fileprivate var isBuffering: Bool = true
+    
+    // Drift tracking metrics
+    fileprivate var underrunCount: Int = 0
+    fileprivate var fillLevelSamples: [Int] = []
+    fileprivate var minFillLevel: Int = 0
+    fileprivate var maxFillLevel: Int = 0
+    fileprivate let maxSamples: Int = 100  // Track last 100 samples for average
 
     // Multi-channel buffers using UnsafeMutablePointer for zero-allocation real-time processing
     // We use UnsafeMutablePointer<UnsafeMutablePointer<Float>> to avoid Swift Array overhead in callbacks
@@ -228,7 +253,37 @@ class AudioGraphManager: ObservableObject {
     
     // MARK: - Buffer Management
     
-
+    /// Get current buffer statistics
+    /// - Returns: BufferStats struct with current buffer state
+    func getBufferStats() -> BufferStats {
+        let bytesUsed = circularBuffer.availableReadSpace()
+        let bytesAvailable = circularBuffer.availableWriteSpace()
+        let percentFull = bufferSize > 0 ? (Double(bytesUsed) / Double(bufferSize)) * 100.0 : 0.0
+        
+        // Calculate average fill level
+        let avgFillLevel = fillLevelSamples.isEmpty ? 0.0 : 
+            Double(fillLevelSamples.reduce(0, +)) / Double(fillLevelSamples.count)
+        
+        return BufferStats(
+            capacity: bufferSize,
+            bytesUsed: bytesUsed,
+            bytesAvailable: bytesAvailable,
+            percentFull: percentFull,
+            isBuffering: isBuffering,
+            underrunCount: underrunCount,
+            averageFillLevel: avgFillLevel,
+            minFillLevel: minFillLevel,
+            maxFillLevel: maxFillLevel
+        )
+    }
+    
+    /// Reset drift tracking statistics
+    func resetDriftStats() {
+        underrunCount = 0
+        fillLevelSamples.removeAll()
+        minFillLevel = 0
+        maxFillLevel = 0
+    }
 
     // MARK: - Private Setup Methods
 
@@ -597,6 +652,7 @@ private func outputRenderCallback(
         // Check for underrun
         if manager.circularBuffer.availableReadSpace() < totalBytesNeeded {
             manager.isBuffering = true
+            manager.underrunCount += 1  // Track underruns for drift monitoring
             // Output silence
             for i in 0..<outputChannelCount {
                 let buffer = bufferPtr.advanced(by: i)
@@ -605,6 +661,23 @@ private func outputRenderCallback(
                 }
             }
             return
+        }
+        
+        // Update drift tracking metrics
+        let currentFillLevel = manager.circularBuffer.availableReadSpace()
+        
+        // Update min/max
+        if manager.minFillLevel == 0 || currentFillLevel < manager.minFillLevel {
+            manager.minFillLevel = currentFillLevel
+        }
+        if currentFillLevel > manager.maxFillLevel {
+            manager.maxFillLevel = currentFillLevel
+        }
+        
+        // Add to rolling average
+        manager.fillLevelSamples.append(currentFillLevel)
+        if manager.fillLevelSamples.count > manager.maxSamples {
+            manager.fillLevelSamples.removeFirst()
         }
 
         // Read sequential data from circular buffer into inputChannelBufferPtrs
