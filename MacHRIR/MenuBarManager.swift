@@ -53,6 +53,13 @@ class MenuBarManager: NSObject, NSMenuDelegate {
         
         // Wait for devices to populate before loading settings
         waitForDevicesAndInitialize()
+        
+        // Check permissions on startup
+        PermissionManager.shared.checkAndRequestMicrophonePermission { granted in
+            if !granted {
+                Logger.log("[MenuBarManager] ⚠️ Microphone permission denied")
+            }
+        }
     }
     
     private func setupStatusItem() {
@@ -265,6 +272,12 @@ class MenuBarManager: NSObject, NSMenuDelegate {
         menu.addItem(NSMenuItem.separator())
         
         // --- Application Management ---
+        let settingsItem = NSMenuItem(title: "Settings...", action: #selector(showSettings), keyEquivalent: ",")
+        settingsItem.target = self
+        menu.addItem(settingsItem)
+        
+        menu.addItem(NSMenuItem.separator())
+        
         let aboutItem = NSMenuItem(title: "About MacHRIR", action: #selector(showAbout), keyEquivalent: "")
         aboutItem.target = self
         menu.addItem(aboutItem)
@@ -446,6 +459,10 @@ class MenuBarManager: NSObject, NSMenuDelegate {
     
     @objc private func showAbout() {
         NSApp.orderFrontStandardAboutPanel(nil)
+    }
+    
+    @objc private func showSettings() {
+        SettingsWindowController.shared.showSettings()
     }
     
     @objc private func quitApp() {
