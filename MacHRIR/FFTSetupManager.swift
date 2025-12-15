@@ -49,12 +49,12 @@ class FFTSetupManager {
         
         // Create new setup
         guard let newSetup = vDSP_create_fftsetup(log2n, FFTRadix(kFFTRadix2)) else {
-            print("[FFTSetupManager] Failed to create FFT setup for log2n=\(log2n)")
+            Logger.log("[FFTSetupManager] Failed to create FFT setup for log2n=\(log2n)")
             return nil
         }
         
         setupCache[log2n] = newSetup
-        print("[FFTSetupManager] Created shared FFT setup for log2n=\(log2n) (size=\(1 << log2n))")
+        Logger.log("[FFTSetupManager] Created shared FFT setup for log2n=\(log2n) (size=\(1 << log2n))")
         
         return newSetup
     }

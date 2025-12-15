@@ -21,6 +21,10 @@ class ConvolutionEngine {
     private let blockSize: Int
     private let partitionCount: Int
     
+    // Power-of-2 partitioning for branch-free circular indexing
+    private let partitionCountPow2: Int  // Next power of 2 >= partitionCount
+    private let partitionMask: Int       // partitionCountPow2 - 1 for bitwise AND
+    
     private let fftSetup: FFTSetup
     private let ownsFFTSetup: Bool  // Track if we own the FFTSetup (should destroy in deinit)
     
@@ -28,17 +32,15 @@ class ConvolutionEngine {
     private let inputBuffer: UnsafeMutablePointer<Float>
     private let inputOverlapBuffer: UnsafeMutablePointer<Float> // Stores previous block
     
-    // Frequency Domain Delay Line (FDL)
-    // We store the FFT of past input blocks.
-    // Using UnsafeMutablePointer arrays instead of Swift arrays to avoid subscript allocations
-    private var fdlRealPtr: UnsafeMutablePointer<UnsafeMutablePointer<Float>>!
-    private var fdlImagPtr: UnsafeMutablePointer<UnsafeMutablePointer<Float>>!
+    // Frequency Domain Delay Line (FDL) - OPTIMIZED: Contiguous flat buffers
+    // We store the FFT of past input blocks in contiguous memory for cache efficiency
+    private var fdlRealData: UnsafeMutablePointer<Float>!
+    private var fdlImagData: UnsafeMutablePointer<Float>!
     private var fdlIndex: Int = 0
     
-    // HRIR Partitions (Frequency Domain)
-    // Using UnsafeMutablePointer arrays instead of Swift arrays to avoid subscript allocations
-    private var hrirRealPtr: UnsafeMutablePointer<UnsafeMutablePointer<Float>>!
-    private var hrirImagPtr: UnsafeMutablePointer<UnsafeMutablePointer<Float>>!
+    // HRIR Partitions (Frequency Domain) - OPTIMIZED: Contiguous flat buffers
+    private var hrirRealData: UnsafeMutablePointer<Float>!
+    private var hrirImagData: UnsafeMutablePointer<Float>!
     
     // Processing Buffers
     private let splitComplexInputReal: UnsafeMutablePointer<Float>
@@ -55,12 +57,6 @@ class ConvolutionEngine {
     
     // Pre-allocated buffer for processAndAccumulate to avoid real-time allocation
     private let tempOutputBuffer: UnsafeMutablePointer<Float>
-    
-    // Pre-allocated reusable split complex wrappers for partition loop (zero-allocation)
-    private var fdlSplitReusable: DSPSplitComplex
-    private var hrirSplitReusable: DSPSplitComplex
-    private var accSplitReusable: DSPSplitComplex
-    private var tempSplitReusable: DSPSplitComplex
     
     // MARK: - Initialization
 
@@ -81,22 +77,26 @@ class ConvolutionEngine {
         if let shared = sharedFFTSetup {
             self.fftSetup = shared
             self.ownsFFTSetup = false
-            print("[Convolution] Using shared FFT setup")
+            Logger.log("[Convolution] Using shared FFT setup")
         } else {
             guard let setup = vDSP_create_fftsetup(log2n, FFTRadix(kFFTRadix2)) else {
-                print("[Convolution] Failed to create FFT setup")
+                Logger.log("[Convolution] Failed to create FFT setup")
                 return nil
             }
             self.fftSetup = setup
             self.ownsFFTSetup = true
-            print("[Convolution] Created private FFT setup")
+            Logger.log("[Convolution] Created private FFT setup")
         }
         
         // 2. Calculate Partitions
         // We pad the HRIR to be a multiple of blockSize
         self.partitionCount = Int(ceil(Double(hrirSamples.count) / Double(blockSize)))
         
-        print("[Convolution] Init: BlockSize=\(blockSize), HRIR=\(hrirSamples.count), Partitions=\(partitionCount)")
+        // Calculate power-of-2 partition count for branch-free circular indexing
+        self.partitionCountPow2 = 1 << Int(ceil(log2(Double(partitionCount))))
+        self.partitionMask = partitionCountPow2 - 1
+        
+        Logger.log("[Convolution] Init: BlockSize=\(blockSize), HRIR=\(hrirSamples.count), Partitions=\(partitionCount), Pow2=\(partitionCountPow2)")
         
         // 3. Allocate Input Buffers
         self.inputBuffer = UnsafeMutablePointer<Float>.allocate(capacity: fftSize)
@@ -121,33 +121,21 @@ class ConvolutionEngine {
         // Pre-allocate temp buffer for processAndAccumulate
         self.tempOutputBuffer = UnsafeMutablePointer<Float>.allocate(capacity: blockSize)
         
-        // Initialize reusable split complex wrappers (pointers will be updated per-partition, zero-allocation)
-        self.fdlSplitReusable = DSPSplitComplex(realp: splitComplexInputReal, imagp: splitComplexInputImag)
-        self.hrirSplitReusable = DSPSplitComplex(realp: splitComplexInputReal, imagp: splitComplexInputImag)
-        self.accSplitReusable = DSPSplitComplex(realp: accumulatorReal, imagp: accumulatorImag)
-        self.tempSplitReusable = DSPSplitComplex(realp: tempMulReal, imagp: tempMulImag)
+        // 5. Initialize FDL and HRIR Flat Buffers (OPTIMIZED: Contiguous memory)
+        // Allocate single contiguous blocks for all partitions to improve cache efficiency
+        let fdlTotalSize = partitionCountPow2 * fftSizeHalf
+        let hrirTotalSize = partitionCountPow2 * fftSizeHalf
         
-        // 5. Initialize FDL and HRIR Arrays (using pointer arrays for zero-allocation access)
-        fdlRealPtr = UnsafeMutablePointer<UnsafeMutablePointer<Float>>.allocate(capacity: partitionCount)
-        fdlImagPtr = UnsafeMutablePointer<UnsafeMutablePointer<Float>>.allocate(capacity: partitionCount)
-        hrirRealPtr = UnsafeMutablePointer<UnsafeMutablePointer<Float>>.allocate(capacity: partitionCount)
-        hrirImagPtr = UnsafeMutablePointer<UnsafeMutablePointer<Float>>.allocate(capacity: partitionCount)
+        fdlRealData = UnsafeMutablePointer<Float>.allocate(capacity: fdlTotalSize)
+        fdlImagData = UnsafeMutablePointer<Float>.allocate(capacity: fdlTotalSize)
+        hrirRealData = UnsafeMutablePointer<Float>.allocate(capacity: hrirTotalSize)
+        hrirImagData = UnsafeMutablePointer<Float>.allocate(capacity: hrirTotalSize)
         
-        for i in 0..<partitionCount {
-            // FDL
-            let fReal = UnsafeMutablePointer<Float>.allocate(capacity: fftSizeHalf)
-            let fImag = UnsafeMutablePointer<Float>.allocate(capacity: fftSizeHalf)
-            fReal.initialize(repeating: 0, count: fftSizeHalf)
-            fImag.initialize(repeating: 0, count: fftSizeHalf)
-            fdlRealPtr[i] = fReal
-            fdlImagPtr[i] = fImag
-            
-            // HRIR
-            let hReal = UnsafeMutablePointer<Float>.allocate(capacity: fftSizeHalf)
-            let hImag = UnsafeMutablePointer<Float>.allocate(capacity: fftSizeHalf)
-            hrirRealPtr[i] = hReal
-            hrirImagPtr[i] = hImag
-        }
+        // Initialize all to zero
+        fdlRealData.initialize(repeating: 0, count: fdlTotalSize)
+        fdlImagData.initialize(repeating: 0, count: fdlTotalSize)
+        hrirRealData.initialize(repeating: 0, count: hrirTotalSize)
+        hrirImagData.initialize(repeating: 0, count: hrirTotalSize)
         
         // 6. Process HRIR Partitions
         var tempPadBuffer = [Float](repeating: 0, count: fftSize)
@@ -168,12 +156,13 @@ class ConvolutionEngine {
             }
             
             // FFT this partition
-            // We use the temp buffer as input to FFT.
-            // Note: For real-to-complex FFT, we pack the input.
-            // But here we can just use our split complex buffers directly if we cast.
+            // Calculate offset into flat buffer for this partition
+            let partitionOffset = p * fftSizeHalf
+            let hrirRealPartition = hrirRealData.advanced(by: partitionOffset)
+            let hrirImagPartition = hrirImagData.advanced(by: partitionOffset)
             
-            // Pack into split complex (using hrirReal/Imag as destination)
-            var splitH = DSPSplitComplex(realp: hrirRealPtr[p], imagp: hrirImagPtr[p])
+            // Pack into split complex (using flat buffer offsets)
+            var splitH = DSPSplitComplex(realp: hrirRealPartition, imagp: hrirImagPartition)
             
             tempPadBuffer.withUnsafeBufferPointer { ptr in
                 ptr.baseAddress!.withMemoryRebound(to: DSPComplex.self, capacity: fftSizeHalf) { complexPtr in
@@ -187,19 +176,23 @@ class ConvolutionEngine {
             // Debug: Check first partition energy
             if p == 0 {
                 var energy: Float = 0
-                vDSP_sve(hrirRealPtr[0], 1, &energy, vDSP_Length(fftSizeHalf))
-                print("[Convolution] Partition 0 real sum: \(energy)")
+                vDSP_sve(hrirRealData, 1, &energy, vDSP_Length(fftSizeHalf))
+                Logger.log("[Convolution] Partition 0 real sum: \(energy)")
             }
         }
 
         // Debug: Log HRIR FFT energy for first few partitions
         for p in 0..<min(3, partitionCount) {
+            let partitionOffset = p * fftSizeHalf
+            let hrirRealPartition = hrirRealData.advanced(by: partitionOffset)
+            let hrirImagPartition = hrirImagData.advanced(by: partitionOffset)
+            
             var realEnergy: Float = 0
             var imagEnergy: Float = 0
-            vDSP_svesq(hrirRealPtr[p], 1, &realEnergy, vDSP_Length(fftSizeHalf))
-            vDSP_svesq(hrirImagPtr[p], 1, &imagEnergy, vDSP_Length(fftSizeHalf))
+            vDSP_svesq(hrirRealPartition, 1, &realEnergy, vDSP_Length(fftSizeHalf))
+            vDSP_svesq(hrirImagPartition, 1, &imagEnergy, vDSP_Length(fftSizeHalf))
             let totalEnergy = sqrt(realEnergy + imagEnergy)
-            print("[Convolution] Partition[\(p)] FFT energy: \(String(format: "%.6f", totalEnergy))")
+            Logger.log("[Convolution] Partition[\(p)] FFT energy: \(String(format: "%.6f", totalEnergy))")
         }
     }
     
@@ -223,16 +216,11 @@ class ConvolutionEngine {
         
         tempOutputBuffer.deallocate()
         
-        for i in 0..<partitionCount {
-            fdlRealPtr[i].deallocate()
-            fdlImagPtr[i].deallocate()
-            hrirRealPtr[i].deallocate()
-            hrirImagPtr[i].deallocate()
-        }
-        fdlRealPtr.deallocate()
-        fdlImagPtr.deallocate()
-        hrirRealPtr.deallocate()
-        hrirImagPtr.deallocate()
+        // Deallocate flat buffers
+        fdlRealData.deallocate()
+        fdlImagData.deallocate()
+        hrirRealData.deallocate()
+        hrirImagData.deallocate()
     }
 
     // MARK: - Public Methods
@@ -270,9 +258,10 @@ class ConvolutionEngine {
             fdlIndex += partitionCount
         }
         
-        // Copy current FFT to FDL head
-        memcpy(fdlRealPtr[fdlIndex], splitComplexInput.realp, fftSizeHalf * MemoryLayout<Float>.size)
-        memcpy(fdlImagPtr[fdlIndex], splitComplexInput.imagp, fftSizeHalf * MemoryLayout<Float>.size)
+        // Copy current FFT to FDL head (using flat buffer with offset)
+        let fdlOffset = fdlIndex * fftSizeHalf
+        memcpy(fdlRealData.advanced(by: fdlOffset), splitComplexInput.realp, fftSizeHalf * MemoryLayout<Float>.size)
+        memcpy(fdlImagData.advanced(by: fdlOffset), splitComplexInput.imagp, fftSizeHalf * MemoryLayout<Float>.size)
         
         // 4. Convolution Sum (Partitioned)
         // Accumulator = Sum(FDL[i] * HRIR[i])
@@ -289,65 +278,73 @@ class ConvolutionEngine {
         let accImagDC = accumulator.imagp
         
         // Capture class properties to locals to avoid self access in hot loop
-        let fdlRealPtrLocal = fdlRealPtr!
-        let fdlImagPtrLocal = fdlImagPtr!
-        let hrirRealPtrLocal = hrirRealPtr!
-        let hrirImagPtrLocal = hrirImagPtr!
+        let fdlRealDataLocal = fdlRealData!
+        let fdlImagDataLocal = fdlImagData!
+        let hrirRealDataLocal = hrirRealData!
+        let hrirImagDataLocal = hrirImagData!
         
         // Capture temp buffer pointers
         let tempMulReal = tempMul.realp
         let tempMulImag = tempMul.imagp
         
-        // Create reusable structs ONCE on stack (avoid init in loop)
-        var fdlSplit = DSPSplitComplex(realp: fdlRealPtrLocal[0], imagp: fdlImagPtrLocal[0])
-        var hrirSplit = DSPSplitComplex(realp: hrirRealPtrLocal[0], imagp: hrirImagPtrLocal[0])
-        var accSplit = DSPSplitComplex(realp: accRealDC, imagp: accImagDC)
-        var tempSplit = DSPSplitComplex(realp: tempMulReal, imagp: tempMulImag)
+        // OPTIMIZATION: Unroll first partition outside loop to eliminate branches
+        // Handle first partition (p=0)
+        // NOTE: FDL uses modulo by partitionCount (not power-of-2) for correct wraparound
+        var fdlIdx0 = fdlIndex
+        if fdlIdx0 < 0 {
+            fdlIdx0 += partitionCount
+        }
+        let fdlOffset0 = fdlIdx0 * fftSizeHalf
+        let fdlRBase0 = fdlRealDataLocal.advanced(by: fdlOffset0)
+        let fdlIBase0 = fdlImagDataLocal.advanced(by: fdlOffset0)
+        let hRBase0 = hrirRealDataLocal  // First HRIR partition (offset 0)
+        let hIBase0 = hrirImagDataLocal
         
-        // Use while loop to avoid Iterator/Range allocation overhead
-        var p = 0
+        // DC/Nyquist for first partition (direct assignment, no accumulation)
+        accRealDC.pointee = fdlRBase0.pointee * hRBase0.pointee
+        accImagDC.pointee = fdlIBase0.pointee * hIBase0.pointee
+        
+        // Complex bins for first partition (direct write, no accumulation)
+        var accSplit = DSPSplitComplex(realp: accRealDC + 1, imagp: accImagDC + 1)
+        var fdlSplit = DSPSplitComplex(realp: fdlRBase0 + 1, imagp: fdlIBase0 + 1)
+        var hrirSplit = DSPSplitComplex(realp: hRBase0 + 1, imagp: hIBase0 + 1)
+        vDSP_zvmul(&fdlSplit, 1, &hrirSplit, 1, &accSplit, 1, len, 1)
+        
+        // OPTIMIZATION: Remaining partitions - stack-allocated structs per iteration
+        // This allows the compiler to optimize struct lifetime and eliminates repeated mutations
+        var p = 1
         while p < partitionCount {
-            // Calculate FDL index inline
+            // FDL circular index calculation
+            // CRITICAL: Must use partitionCount for wraparound, not partitionMask
+            // because HRIR only has valid data in [0, partitionCount), not [0, partitionCountPow2)
             var fdlIdx = fdlIndex + p
             if fdlIdx >= partitionCount {
                 fdlIdx -= partitionCount
             }
             
-            // Get base pointers directly from local captured pointers
-            let fdlRBase = fdlRealPtrLocal[fdlIdx]
-            let fdlIBase = fdlImagPtrLocal[fdlIdx]
-            let hRBase = hrirRealPtrLocal[p]
-            let hIBase = hrirImagPtrLocal[p]
+            // Calculate offsets into flat contiguous buffers (cache-friendly)
+            let fdlOffset = fdlIdx * fftSizeHalf
+            let hrirOffset = p * fftSizeHalf
             
-            // 1. Handle DC and Nyquist (Index 0)
-            if p == 0 {
-                accRealDC.pointee = fdlRBase.pointee * hRBase.pointee
-                accImagDC.pointee = fdlIBase.pointee * hIBase.pointee
-            } else {
-                accRealDC.pointee += fdlRBase.pointee * hRBase.pointee
-                accImagDC.pointee += fdlIBase.pointee * hIBase.pointee
-            }
+            // Get base pointers from flat buffers (single pointer arithmetic, no double dereference)
+            let fdlRBase = fdlRealDataLocal.advanced(by: fdlOffset)
+            let fdlIBase = fdlImagDataLocal.advanced(by: fdlOffset)
+            let hRBase = hrirRealDataLocal.advanced(by: hrirOffset)
+            let hIBase = hrirImagDataLocal.advanced(by: hrirOffset)
             
-            // 2. Handle Complex Bins
-            // Update existing structs instead of creating new ones
-            fdlSplit.realp = fdlRBase + 1
-            fdlSplit.imagp = fdlIBase + 1
-            hrirSplit.realp = hRBase + 1
-            hrirSplit.imagp = hIBase + 1
+            // Accumulate DC and Nyquist (no branch - always accumulate for p > 0)
+            accRealDC.pointee += fdlRBase.pointee * hRBase.pointee
+            accImagDC.pointee += fdlIBase.pointee * hIBase.pointee
             
-            if p == 0 {
-                accSplit.realp = accRealDC + 1
-                accSplit.imagp = accImagDC + 1
-                vDSP_zvmul(&fdlSplit, 1, &hrirSplit, 1, &accSplit, 1, len, 1)
-            } else {
-                tempSplit.realp = tempMulReal + 1
-                tempSplit.imagp = tempMulImag + 1
-                accSplit.realp = accRealDC + 1
-                accSplit.imagp = accImagDC + 1
-                
-                vDSP_zvmul(&fdlSplit, 1, &hrirSplit, 1, &tempSplit, 1, len, 1)
-                vDSP_zvadd(&tempSplit, 1, &accSplit, 1, &accSplit, 1, len)
-            }
+            // Stack-allocated structs for complex bins (compiler can optimize lifetime)
+            var fdl = DSPSplitComplex(realp: fdlRBase + 1, imagp: fdlIBase + 1)
+            var hrir = DSPSplitComplex(realp: hRBase + 1, imagp: hIBase + 1)
+            var temp = DSPSplitComplex(realp: tempMulReal + 1, imagp: tempMulImag + 1)
+            var acc = DSPSplitComplex(realp: accRealDC + 1, imagp: accImagDC + 1)
+            
+            // vDSP operations
+            vDSP_zvmul(&fdl, 1, &hrir, 1, &temp, 1, len, 1)
+            vDSP_zvadd(&temp, 1, &acc, 1, &acc, 1, len)
             
             p += 1
         }
@@ -401,10 +398,10 @@ class ConvolutionEngine {
         memset(inputBuffer, 0, fftSize * MemoryLayout<Float>.size)
         memset(inputOverlapBuffer, 0, blockSize * MemoryLayout<Float>.size)
         
-        for i in 0..<partitionCount {
-            memset(fdlRealPtr[i], 0, fftSizeHalf * MemoryLayout<Float>.size)
-            memset(fdlImagPtr[i], 0, fftSizeHalf * MemoryLayout<Float>.size)
-        }
+        // Reset flat FDL buffers
+        let fdlTotalSize = partitionCountPow2 * fftSizeHalf
+        memset(fdlRealData, 0, fdlTotalSize * MemoryLayout<Float>.size)
+        memset(fdlImagData, 0, fdlTotalSize * MemoryLayout<Float>.size)
         
         fdlIndex = 0
     }
