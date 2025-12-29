@@ -12,6 +12,47 @@ import SwiftUI
 import Combine
 import CoreAudio
 
+// MARK: - Custom Menu Header View
+class MenuHeaderView: NSView {
+    private let iconImageView = NSImageView()
+    private let titleLabel = NSTextField()
+    
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        setupView()
+    }
+    
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        setupView()
+    }
+    
+    private func setupView() {
+        // Set frame size (reduced height for smaller content)
+        self.frame = NSRect(x: 0, y: 0, width: 250, height: 36)
+        
+        // Configure icon (14x14, vertically centered)
+        if let icon = NSImage(named: "AirwaveIcon") {
+            icon.isTemplate = true
+            iconImageView.image = icon
+        }
+        iconImageView.imageScaling = .scaleProportionallyUpOrDown
+        iconImageView.contentTintColor = .labelColor
+        iconImageView.frame = NSRect(x: 12, y: 11, width: 14, height: 14)
+        addSubview(iconImageView)
+        
+        // Configure title label (vertically centered with icon)
+        titleLabel.stringValue = "Airwave"
+        titleLabel.isEditable = false
+        titleLabel.isBordered = false
+        titleLabel.backgroundColor = .clear
+        titleLabel.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
+        titleLabel.textColor = .labelColor
+        titleLabel.frame = NSRect(x: 32, y: 10, width: 150, height: 16)
+        addSubview(titleLabel)
+    }
+}
+
 class MenuBarManager: NSObject, NSMenuDelegate {
     private var statusItem: NSStatusItem!
     private var menu: NSMenu!
@@ -155,10 +196,13 @@ class MenuBarManager: NSObject, NSMenuDelegate {
     private func updateMenu() {
         menu.removeAllItems()
         
-        // --- Aggregate Device Selection ---
-        let deviceItemTitle = NSMenuItem(title: "Device Configuration", action: nil, keyEquivalent: "")
-        deviceItemTitle.isEnabled = false
-        menu.addItem(deviceItemTitle)
+        // Add custom header view
+        let headerView = MenuHeaderView()
+        let headerItem = NSMenuItem()
+        headerItem.view = headerView
+        menu.addItem(headerItem)
+        
+        menu.addItem(NSMenuItem.separator())
 
         let deviceMenuTitle = "Aggregate Device: \(audioManager.aggregateDevice?.name ?? "None")"
         let deviceItem = NSMenuItem(title: deviceMenuTitle, action: nil, keyEquivalent: "")
@@ -190,12 +234,6 @@ class MenuBarManager: NSObject, NSMenuDelegate {
             }
         }
         
-        deviceMenu.addItem(NSMenuItem.separator())
-        
-        let createItem = NSMenuItem(title: "Create Aggregate Device...", action: #selector(showAggregateDeviceHelp), keyEquivalent: "")
-        createItem.target = self
-        deviceMenu.addItem(createItem)
-        
         // --- Output Device Selection ---
         if audioManager.aggregateDevice != nil {
             let outputMenuTitle = "Output Device: \(audioManager.selectedOutputDevice?.name ?? "None")"
@@ -225,10 +263,28 @@ class MenuBarManager: NSObject, NSMenuDelegate {
             menu.addItem(helpItem)
         }
         
+        // --- Audio Engine Toggle ---
+        let diagnostics = SystemDiagnosticsManager.shared.diagnostics
+        let isRunning = audioManager.isRunning
+        let canStart = diagnostics.isFullyConfigured && audioManager.aggregateDevice != nil
+        
+        let engineTitle: String
+        if !diagnostics.isFullyConfigured {
+            engineTitle = "Audio Engine: Complete diagnostics setup"
+        } else if audioManager.aggregateDevice == nil {
+            engineTitle = "Audio Engine: Select a device"
+        } else {
+            engineTitle = isRunning ? "Audio Engine: Running ✓" : "Audio Engine: Stopped"
+        }
+        
+        let engineItem = NSMenuItem(title: engineTitle, action: #selector(toggleAudioEngine), keyEquivalent: "")
+        engineItem.target = self
+        engineItem.isEnabled = canStart
+        menu.addItem(engineItem)
+        
         menu.addItem(NSMenuItem.separator())
         
         // --- Settings (formerly Diagnostics) ---
-        let diagnostics = SystemDiagnosticsManager.shared.diagnostics
         let settingsTitle = diagnostics.isFullyConfigured ? "Settings" : "Settings\t⚠️"
         let settingsItem = NSMenuItem(title: settingsTitle, action: #selector(showSettings), keyEquivalent: ",")
         settingsItem.target = self
@@ -383,6 +439,15 @@ class MenuBarManager: NSObject, NSMenuDelegate {
         """
         alert.addButton(withTitle: "OK")
         alert.runModal()
+    }
+    
+    @objc private func toggleAudioEngine() {
+        if audioManager.isRunning {
+            audioManager.stop()
+        } else {
+            audioManager.start()
+        }
+        updateMenu()
     }
     
     @objc private func showAbout() {

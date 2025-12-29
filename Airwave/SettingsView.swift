@@ -251,53 +251,7 @@ struct SettingsView: View {
                 }
                 
                 Divider().padding(.leading, 44)
-                
-                // Audio Engine Toggle
-                HStack(spacing: 12) {
-                    Image(systemName: audioManager.isRunning ? "waveform.circle.fill" : "waveform.circle")
-                        .font(.system(size: 20))
-                        .foregroundStyle(.green)
-                        .frame(width: 32)
-                    
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Audio Engine")
-                            .font(.system(size: 13, weight: .medium))
-                        if !diagnosticsManager.diagnostics.isFullyConfigured {
-                            Text("Complete diagnostics setup to continue")
-                                .font(.caption)
-                                .foregroundStyle(.orange)
-                        } else if audioManager.aggregateDevice == nil {
-                            Text("Select a device to continue")
-                                .font(.caption)
-                                .foregroundStyle(.orange)
-                        } else {
-                            Text(audioManager.isRunning ? "Processing audio" : "Stopped")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    
-                    Spacer()
-                    
-                    Toggle("", isOn: Binding(
-                        get: { audioManager.isRunning },
-                        set: { shouldRun in
-                            if shouldRun {
-                                audioManager.start()
-                            } else {
-                                audioManager.stop()
-                            }
-                        }
-                    ))
-                        .labelsHidden()
-                        .toggleStyle(.switch)
-                        .disabled(!diagnosticsManager.diagnostics.isFullyConfigured || audioManager.aggregateDevice == nil)
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 10)
-                
-                Divider().padding(.leading, 44)
-                
+
                 // HRIR Preset Selector
                 HStack(spacing: 12) {
                     Image(systemName: "waveform.circle.fill")
@@ -350,6 +304,52 @@ struct SettingsView: View {
                         .labelsHidden()
                         .frame(width: 150)
                     }
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                
+                Divider().padding(.leading, 44)
+
+                // Audio Engine Toggle
+                HStack(spacing: 12) {
+                    Image(systemName: audioManager.isRunning ? "waveform.circle.fill" : "waveform.circle")
+                        .font(.system(size: 20))
+                        .foregroundStyle(.green)
+                        .frame(width: 32)
+                    
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Audio Engine")
+                            .font(.system(size: 13, weight: .medium))
+                        if !diagnosticsManager.diagnostics.isFullyConfigured {
+                            Text("Complete diagnostics setup to continue")
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                        } else if audioManager.aggregateDevice == nil {
+                            Text("Select a device to continue")
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                        } else {
+                            Text(audioManager.isRunning ? "Processing audio" : "Stopped")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    
+                    Spacer()
+                    
+                    Toggle("", isOn: Binding(
+                        get: { audioManager.isRunning },
+                        set: { shouldRun in
+                            if shouldRun {
+                                audioManager.start()
+                            } else {
+                                audioManager.stop()
+                            }
+                        }
+                    ))
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .disabled(!diagnosticsManager.diagnostics.isFullyConfigured || audioManager.aggregateDevice == nil)
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 10)

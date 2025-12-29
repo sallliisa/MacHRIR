@@ -10,7 +10,6 @@ import CoreAudio
 import Combine
 
 /// Represents an audio device on the system
-/// Represents an audio device on the system
 struct AudioDevice: Identifiable, Equatable, Hashable {
     let id: AudioDeviceID
 
@@ -345,7 +344,6 @@ class AudioDeviceManager: ObservableObject {
         )
         
         if status == noErr {
-            Logger.log("[AudioDevice] Set volume for \(device.name) to \(Int(clampedVolume * 100))%")
             return true
         }
         
@@ -376,7 +374,6 @@ class AudioDeviceManager: ObservableObject {
         rightSuccess = (rightStatus == noErr)
         
         if leftSuccess || rightSuccess {
-            Logger.log("[AudioDevice] Set volume for \(device.name) to \(Int(clampedVolume * 100))% (channel-specific)")
             return true
         }
         
