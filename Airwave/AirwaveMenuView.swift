@@ -141,7 +141,7 @@ struct AccordionSection<Content: View>: View {
                 .frame(maxWidth: .infinity)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 6)
-                .background(isHovered ? Color.accentColor.opacity(0.2) : Color.clear)
+                .background(isHovered ? Color.primary.opacity(0.08) : Color.clear)
                 .cornerRadius(12)
                 .contentShape(Rectangle())
             }
@@ -190,7 +190,7 @@ struct DeviceRow: View {
             .frame(maxWidth: .infinity)
             .padding(.horizontal, 15)
             .padding(.vertical, 5)
-            .background(isHovered ? Color.accentColor.opacity(0.15) : Color.clear)
+            .background(isHovered ? Color.primary.opacity(0.08) : Color.clear)
             .cornerRadius(12)
             .contentShape(Rectangle())
         }
@@ -228,7 +228,7 @@ struct SubmenuRow<Content: View>: View {
             .frame(maxWidth: .infinity)
             .padding(.horizontal, 14)
             .padding(.vertical, 8)
-            .background(isHovered ? Color.accentColor.opacity(0.2) : Color.clear)
+            .background(isHovered ? Color.primary.opacity(0.08) : Color.clear)
             .cornerRadius(12)
             .contentShape(Rectangle())
             .onHover { hovering in
@@ -274,7 +274,7 @@ struct ActionRow: View {
             .frame(maxWidth: .infinity)
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
-            .background(isHovered ? Color.accentColor.opacity(0.2) : Color.clear)
+            .background(isHovered ? Color.primary.opacity(0.08) : Color.clear)
             .cornerRadius(12)
             .contentShape(Rectangle())
         }
