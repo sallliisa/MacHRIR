@@ -9,17 +9,12 @@ import AppKit
 import SwiftUI
 
 class AppDelegate: NSObject, NSApplicationDelegate {
-    var menuBarManager: MenuBarManager?
-    
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Safety check: Restore system audio if app crashed while on BlackHole
         checkAndRestoreSystemAudio()
         
         // Setup signal handlers to catch Xcode stop/termination
         setupSignalHandlers()
-        
-        // Initialize the menu bar manager
-        menuBarManager = MenuBarManager()
     }
     
     /// Setup signal handlers to catch termination from Xcode or system

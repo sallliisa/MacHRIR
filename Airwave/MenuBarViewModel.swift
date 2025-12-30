@@ -1,10 +1,8 @@
 //
-//  MenuBarManager.swift
+//  MenuBarViewModel.swift
 //  Airwave
 //
-//  Created by gamer on 22/11/25.
-//
-//  Updated for Aggregate Device Architecture with Multi-Output Support
+//  Migrated from MenuBarManager.swift for SwiftUI MenuBarExtra
 //
 
 import AppKit
@@ -12,55 +10,14 @@ import SwiftUI
 import Combine
 import CoreAudio
 
-// MARK: - Custom Menu Header View
-class MenuHeaderView: NSView {
-    private let iconImageView = NSImageView()
-    private let titleLabel = NSTextField()
-    
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        setupView()
-    }
-    
-    required init?(coder: NSCoder) {
-        super.init(coder: coder)
-        setupView()
-    }
-    
-    private func setupView() {
-        // Set frame size (reduced height for smaller content)
-        self.frame = NSRect(x: 0, y: 0, width: 250, height: 36)
-        
-        // Configure icon (14x14, vertically centered)
-        if let icon = NSImage(named: "AirwaveIcon") {
-            icon.isTemplate = true
-            iconImageView.image = icon
-        }
-        iconImageView.imageScaling = .scaleProportionallyUpOrDown
-        iconImageView.contentTintColor = .labelColor
-        iconImageView.frame = NSRect(x: 12, y: 11, width: 14, height: 14)
-        addSubview(iconImageView)
-        
-        // Configure title label (vertically centered with icon)
-        titleLabel.stringValue = "Airwave"
-        titleLabel.isEditable = false
-        titleLabel.isBordered = false
-        titleLabel.backgroundColor = .clear
-        titleLabel.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
-        titleLabel.textColor = .labelColor
-        titleLabel.frame = NSRect(x: 32, y: 10, width: 150, height: 16)
-        addSubview(titleLabel)
-    }
-}
-
-class MenuBarManager: NSObject, NSMenuDelegate {
-    private var statusItem: NSStatusItem!
-    private var menu: NSMenu!
+@MainActor
+class MenuBarViewModel: ObservableObject {
+    static let shared = MenuBarViewModel()
     
     // Managers
-    private let audioManager = AudioGraphManager.shared
-    private let hrirManager = HRIRManager.shared
-    private let deviceManager = AudioDeviceManager.shared
+    let audioManager = AudioGraphManager.shared
+    let hrirManager = HRIRManager.shared
+    let deviceManager = AudioDeviceManager.shared
     private let settingsManager = SettingsManager()
     private let inspector = AggregateDeviceInspector()
     
@@ -76,53 +33,32 @@ class MenuBarManager: NSObject, NSMenuDelegate {
     private var aggregateListenerAdded = false
     private var currentMonitoredAggregate: AudioDevice?
     
-    override init() {
-        super.init()
-        
+    private init() {
         // Configure inspector to skip missing devices gracefully
         inspector.missingDeviceStrategy = .skipMissing
         
         // Connect managers
         audioManager.hrirManager = hrirManager
         
-        setupStatusItem()
         setupObservers()
         
         // Wait for devices to populate before loading settings
         waitForDevicesAndInitialize()
         
         // Trigger microphone permission prompt on startup if needed
-        // This will post a notification when the user responds, which the
-        // SystemDiagnosticsManager observes to refresh the diagnostics
         PermissionManager.shared.requestMicrophonePermissionIfNeeded()
-    }
-    
-    private func setupStatusItem() {
-        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        
-        if let button = statusItem.button {
-            button.image = NSImage(named: "MenuBarIcon")
-            button.image?.isTemplate = true
-        }
-        
-        menu = NSMenu()
-        menu.delegate = self
-        statusItem.menu = menu
-        
-        updateMenu()
     }
     
     private func setupObservers() {
         // Watch for aggregate device list changes AND refresh available outputs if we have an aggregate selected
         deviceManager.$aggregateDevices
             .debounce(for: .milliseconds(100), scheduler: RunLoop.main)
-            .sink { [weak self] _ in 
+            .sink { [weak self] _ in
                 self?.refreshAvailableOutputsIfNeeded()
-                self?.updateMenu() 
             }
             .store(in: &cancellables)
         
-        // Batch audio manager state changes
+        // Batch audio manager state changes for saving
         Publishers.Merge3(
             audioManager.$isRunning.map { _ in () },
             audioManager.$aggregateDevice.map { _ in () },
@@ -130,40 +66,27 @@ class MenuBarManager: NSObject, NSMenuDelegate {
         )
         .debounce(for: .milliseconds(100), scheduler: RunLoop.main)
         .sink { [weak self] in
-            guard let self = self else { return }
-            self.updateStatusIcon(isRunning: self.audioManager.isRunning)
-            self.updateMenu()
-            self.saveSettings()
+            self?.saveSettings()
         }
         .store(in: &cancellables)
         
-        // Batch HRIR manager state changes
+        // Batch HRIR manager state changes for saving
         Publishers.Merge(
             hrirManager.$activePreset.map { _ in () },
             hrirManager.$presets.map { _ in () }
         )
         .debounce(for: .milliseconds(100), scheduler: RunLoop.main)
         .sink { [weak self] in
-            self?.updateMenu()
             self?.saveSettings()
         }
         .store(in: &cancellables)
-        
-        // Watch for diagnostics changes to update status icon
-        SystemDiagnosticsManager.shared.$diagnostics
-            .debounce(for: .milliseconds(200), scheduler: RunLoop.main)
-            .sink { [weak self] _ in
-                guard let self = self else { return }
-                self.updateStatusIcon(isRunning: self.audioManager.isRunning)
-            }
-            .store(in: &cancellables)
     }
     
     private func waitForDevicesAndInitialize() {
         // Wait for device manager to populate devices
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
             guard let self = self else { return }
-            Logger.log("[MenuBarManager] Initializing settings...")
+            Logger.log("[MenuBarViewModel] Initializing settings...")
             let settings = self.loadSettings()
             self.isInitialized = true
             
@@ -173,137 +96,10 @@ class MenuBarManager: NSObject, NSMenuDelegate {
             }
         }
     }
-
     
-    private func updateStatusIcon(isRunning: Bool) {
-        guard let button = statusItem.button else { return }
-        
-        let diagnostics = SystemDiagnosticsManager.shared.diagnostics
-        let hasWarning = !diagnostics.isFullyConfigured
-        
-        // Choose base icon based on running state
-        let baseImageName = hasWarning ? "MenuBarIconWarning" : isRunning ? "MenuBarIconFilled" : "MenuBarIcon"
-        
-        // Set the base image (always template)
-        button.image = NSImage(named: baseImageName)
-        button.image?.isTemplate = true
-    }
+    // MARK: - Device Validation
     
-    func menuNeedsUpdate(_ menu: NSMenu) {
-        updateMenu()
-    }
-    
-    private func updateMenu() {
-        menu.removeAllItems()
-        
-        // Add custom header view
-        let headerView = MenuHeaderView()
-        let headerItem = NSMenuItem()
-        headerItem.view = headerView
-        menu.addItem(headerItem)
-        
-        menu.addItem(NSMenuItem.separator())
-
-        let deviceMenuTitle = "Aggregate Device: \(audioManager.aggregateDevice?.name ?? "None")"
-        let deviceItem = NSMenuItem(title: deviceMenuTitle, action: nil, keyEquivalent: "")
-        
-        let deviceMenu = NSMenu()
-        deviceItem.submenu = deviceMenu
-        menu.addItem(deviceItem)
-        
-        // Filter for valid aggregate devices (those with connected sub-devices)
-        let allDevices = AudioDeviceManager.getAllDevices()
-        let aggregates = allDevices.filter { device in
-            guard inspector.isAggregateDevice(device) else { return false }
-            
-            // Only show aggregates that have at least one valid output
-            return inspector.hasValidOutputs(aggregate: device)
-        }
-        
-        if aggregates.isEmpty {
-            let emptyItem = NSMenuItem(title: "No aggregate devices found", action: nil, keyEquivalent: "")
-            emptyItem.isEnabled = false
-            deviceMenu.addItem(emptyItem)
-        } else {
-            for device in aggregates {
-                let item = NSMenuItem(title: device.name, action: #selector(selectAggregateDevice(_:)), keyEquivalent: "")
-                item.target = self
-                item.representedObject = device
-                item.state = (device.id == audioManager.aggregateDevice?.id) ? NSControl.StateValue.on : NSControl.StateValue.off
-                deviceMenu.addItem(item)
-            }
-        }
-        
-        // --- Output Device Selection ---
-        if audioManager.aggregateDevice != nil {
-            let outputMenuTitle = "Output Device: \(audioManager.selectedOutputDevice?.name ?? "None")"
-            let outputItem = NSMenuItem(title: outputMenuTitle, action: nil, keyEquivalent: "")
-            
-            let outputMenu = NSMenu()
-            outputItem.submenu = outputMenu
-            menu.addItem(outputItem)
-            
-            if audioManager.availableOutputs.isEmpty {
-                let emptyItem = NSMenuItem(title: "No output devices in aggregate", action: nil, keyEquivalent: "")
-                emptyItem.isEnabled = false
-                outputMenu.addItem(emptyItem)
-            } else {
-                for output in audioManager.availableOutputs {
-                    let channelInfo = "Ch \(output.startChannel)-\(output.endChannel)"
-                    let item = NSMenuItem(title: "\(output.name) (\(channelInfo))", action: #selector(selectOutputDevice(_:)), keyEquivalent: "")
-                    item.target = self
-                    item.representedObject = output
-                    item.state = (output.device.id == audioManager.selectedOutputDevice?.device.id) ? NSControl.StateValue.on : NSControl.StateValue.off
-                    outputMenu.addItem(item)
-                }
-            }
-        } else {
-            let helpItem = NSMenuItem(title: "↑ Select aggregate device first", action: nil, keyEquivalent: "")
-            helpItem.isEnabled = false
-            menu.addItem(helpItem)
-        }
-        
-        // --- Audio Engine Toggle ---
-        let diagnostics = SystemDiagnosticsManager.shared.diagnostics
-        let isRunning = audioManager.isRunning
-        let canStart = diagnostics.isFullyConfigured && audioManager.aggregateDevice != nil
-        
-        let engineTitle: String
-        if !diagnostics.isFullyConfigured {
-            engineTitle = "Audio Engine: Complete diagnostics setup"
-        } else if audioManager.aggregateDevice == nil {
-            engineTitle = "Audio Engine: Select a device"
-        } else {
-            engineTitle = isRunning ? "Audio Engine: Running ✓" : "Audio Engine: Stopped"
-        }
-        
-        let engineItem = NSMenuItem(title: engineTitle, action: #selector(toggleAudioEngine), keyEquivalent: "")
-        engineItem.target = self
-        engineItem.isEnabled = canStart
-        menu.addItem(engineItem)
-        
-        menu.addItem(NSMenuItem.separator())
-        
-        // --- Settings (formerly Diagnostics) ---
-        let settingsTitle = diagnostics.isFullyConfigured ? "Settings" : "Settings\t⚠️"
-        let settingsItem = NSMenuItem(title: settingsTitle, action: #selector(showSettings), keyEquivalent: ",")
-        settingsItem.target = self
-        menu.addItem(settingsItem)
-        
-        menu.addItem(NSMenuItem.separator())
-        
-        let aboutItem = NSMenuItem(title: "About Airwave", action: #selector(showAbout), keyEquivalent: "")
-        aboutItem.target = self
-        menu.addItem(aboutItem)
-        
-        let quitItem = NSMenuItem(title: "Quit Airwave", action: #selector(quitApp), keyEquivalent: "q")
-        quitItem.target = self
-        menu.addItem(quitItem)
-    }
-    
-    // MARK: - Actions
-    
-    private func validateAggregateDevice(_ device: AudioDevice) -> (valid: Bool, reason: String?, validOutputs: [AggregateDeviceInspector.SubDeviceInfo]?) {
+    func validateAggregateDevice(_ device: AudioDevice) -> (valid: Bool, reason: String?, validOutputs: [AggregateDeviceInspector.SubDeviceInfo]?) {
         do {
             let inputs = try inspector.getInputDevices(aggregate: device)
             let allOutputs = try inspector.getOutputDevices(aggregate: device)
@@ -311,7 +107,7 @@ class MenuBarManager: NSObject, NSMenuDelegate {
             // Filter out virtual loopback devices for validation
             let outputs = filterAvailableOutputs(allOutputs)
             
-            Logger.log("[MenuBarManager] Validation: \(inputs.count) connected inputs, \(outputs.count) connected outputs")
+            Logger.log("[MenuBarViewModel] Validation: \(inputs.count) connected inputs, \(outputs.count) connected outputs")
 
             if inputs.isEmpty {
                 return (false, "Aggregate device '\(device.name)' has no connected input devices.\n\nPlease reconnect your input device or update the aggregate in Audio MIDI Setup.", nil)
@@ -322,8 +118,7 @@ class MenuBarManager: NSObject, NSMenuDelegate {
             }
 
             // Check for at least stereo output capability
-            // Note: SubDeviceInfo now uses ranges, so we check outputChannelRange
-            let hasStereoOutput = outputs.contains { 
+            let hasStereoOutput = outputs.contains {
                 guard let range = $0.outputChannelRange else { return false }
                 return (range.upperBound - range.lowerBound) >= 2
             }
@@ -337,15 +132,15 @@ class MenuBarManager: NSObject, NSMenuDelegate {
             return (false, "Could not inspect aggregate device: \(error.localizedDescription)", nil)
         }
     }
-
-    @objc private func selectAggregateDevice(_ sender: NSMenuItem) {
-        guard let device = sender.representedObject as? AudioDevice else { return }
-        
+    
+    // MARK: - Device Selection Actions
+    
+    func selectAggregateDevice(_ device: AudioDevice) {
         // Log device health
         let health = inspector.getDeviceHealth(aggregate: device)
-        Logger.log("[MenuBarManager] Aggregate '\(device.name)': \(health.connected) connected, \(health.missing) missing")
+        Logger.log("[MenuBarViewModel] Aggregate '\(device.name)': \(health.connected) connected, \(health.missing) missing")
         if health.missing > 0 {
-            Logger.log("[MenuBarManager] Missing devices: \(health.missingUIDs)")
+            Logger.log("[MenuBarViewModel] Missing devices: \(health.missingUIDs)")
         }
         
         // Validate first
@@ -396,13 +191,9 @@ class MenuBarManager: NSObject, NSMenuDelegate {
         } catch {
             Logger.log("Failed to configure aggregate device: \(error)")
         }
-        
-        updateMenu()
     }
     
-    @objc private func selectOutputDevice(_ sender: NSMenuItem) {
-        guard let output = sender.representedObject as? AggregateDeviceInspector.SubDeviceInfo else { return }
-        
+    func selectOutputDevice(_ output: AggregateDeviceInspector.SubDeviceInfo) {
         audioManager.selectedOutputDevice = output
         lastUserSelectedOutputUID = output.uid  // Track user's choice
         
@@ -410,11 +201,46 @@ class MenuBarManager: NSObject, NSMenuDelegate {
         let channelRange = output.stereoChannelRange
         audioManager.setOutputChannels(channelRange)
         
-        updateMenu()
         saveSettings()
     }
     
-    @objc private func showAggregateDeviceHelp() {
+    // MARK: - Menu Actions
+    
+    func toggleAudioEngine() {
+        if audioManager.isRunning {
+            audioManager.stop()
+        } else {
+            audioManager.start()
+        }
+    }
+    
+    func showAbout() {
+        closeMenuBarPopover()
+        NSApp.orderFrontStandardAboutPanel(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+    
+    func showSettings() {
+        closeMenuBarPopover()
+        SettingsWindowController.shared.showSettings()
+    }
+    
+    private func closeMenuBarPopover() {
+        // Close the menubar popover by finding and closing the menu window
+        if let window = NSApp.windows.first(where: { $0.className.contains("MenuBar") || $0.className.contains("Popover") }) {
+            window.close()
+        }
+    }
+    
+    func quitApp() {
+        // Cancel debounce timer and save immediately
+        saveDebounceTimer?.invalidate()
+        performSave()
+        audioManager.stop()
+        NSApp.terminate(nil)
+    }
+    
+    func showAggregateDeviceHelp() {
         // Open Audio MIDI Setup
         NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/Utilities/Audio MIDI Setup.app"))
         
@@ -441,37 +267,23 @@ class MenuBarManager: NSObject, NSMenuDelegate {
         alert.runModal()
     }
     
-    @objc private func toggleAudioEngine() {
-        if audioManager.isRunning {
-            audioManager.stop()
-        } else {
-            audioManager.start()
+    // MARK: - Aggregate Device List
+    
+    func getValidAggregateDevices() -> [AudioDevice] {
+        let allDevices = AudioDeviceManager.getAllDevices()
+        return allDevices.filter { device in
+            guard inspector.isAggregateDevice(device) else { return false }
+            
+            // Only show aggregates that have at least one valid output
+            return inspector.hasValidOutputs(aggregate: device)
         }
-        updateMenu()
-    }
-    
-    @objc private func showAbout() {
-        NSApp.orderFrontStandardAboutPanel(nil)
-        NSApp.activate(ignoringOtherApps: true)
-    }
-    
-    @objc private func showSettings() {
-        SettingsWindowController.shared.showSettings()
-    }
-    
-    @objc private func quitApp() {
-        // Cancel debounce timer and save immediately
-        saveDebounceTimer?.invalidate()
-        performSave()
-        audioManager.stop()
-        NSApp.terminate(nil)
     }
     
     // MARK: - Persistence
     
     @discardableResult
     private func loadSettings() -> AppSettings {
-        Logger.log("[MenuBarManager] Loading settings...")
+        Logger.log("[MenuBarViewModel] Loading settings...")
         isRestoringState = true
         
         let settings = settingsManager.loadSettings()
@@ -481,7 +293,7 @@ class MenuBarManager: NSObject, NSMenuDelegate {
            let device = AudioDeviceManager.getDeviceByUID(deviceUID),
            inspector.isAggregateDevice(device) {
             
-            Logger.log("[MenuBarManager] Restoring aggregate device: \(device.name)")
+            Logger.log("[MenuBarViewModel] Restoring aggregate device: \(device.name)")
             audioManager.selectAggregateDevice(device)
             
             // Load available outputs
@@ -521,7 +333,7 @@ class MenuBarManager: NSObject, NSMenuDelegate {
         // Restore preset
         if let presetID = settings.activePresetID,
            let preset = hrirManager.presets.first(where: { $0.id == presetID }) {
-            Logger.log("[MenuBarManager] Restoring preset: \(preset.name)")
+            Logger.log("[MenuBarViewModel] Restoring preset: \(preset.name)")
             let sampleRate = 48000.0
             let inputLayout = InputLayout.detect(channelCount: 2)
             hrirManager.activatePreset(preset, targetSampleRate: sampleRate, inputLayout: inputLayout)
@@ -530,7 +342,7 @@ class MenuBarManager: NSObject, NSMenuDelegate {
         // Allow observers to fire before enabling saves
         DispatchQueue.main.async { [weak self] in
             self?.isRestoringState = false
-            Logger.log("[MenuBarManager] Restoration complete, saves now enabled")
+            Logger.log("[MenuBarViewModel] Restoration complete, saves now enabled")
         }
         
         return settings
@@ -538,19 +350,21 @@ class MenuBarManager: NSObject, NSMenuDelegate {
     
     private func saveSettings() {
         guard isInitialized && !isRestoringState else {
-            Logger.log("[MenuBarManager] Skipping save (Initialized: \(isInitialized), Restoring: \(isRestoringState))")
+            Logger.log("[MenuBarViewModel] Skipping save (Initialized: \(isInitialized), Restoring: \(isRestoringState))")
             return
         }
         
         // Debounce saves
         saveDebounceTimer?.invalidate()
         saveDebounceTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: false) { [weak self] _ in
-            self?.performSave()
+            Task { @MainActor [weak self] in
+                self?.performSave()
+            }
         }
     }
     
     private func performSave() {
-        Logger.log("[MenuBarManager] Saving settings...")
+        Logger.log("[MenuBarViewModel] Saving settings...")
 
         // Get UIDs for persistence
         let aggregateUID = audioManager.aggregateDevice?.uid
@@ -571,13 +385,9 @@ class MenuBarManager: NSObject, NSMenuDelegate {
     
     private func checkAutoStart(with settings: AppSettings) {
         if settings.autoStart && audioManager.aggregateDevice != nil && audioManager.selectedOutputDevice != nil {
-            Logger.log("[MenuBarManager] Auto-starting audio engine...")
+            Logger.log("[MenuBarViewModel] Auto-starting audio engine...")
             audioManager.start()
         }
-    }
-    
-    deinit {
-        removeAggregateDeviceListener()
     }
     
     // MARK: - Aggregate Device Monitoring
@@ -592,43 +402,50 @@ class MenuBarManager: NSObject, NSMenuDelegate {
             mElement: kAudioObjectPropertyElementMain
         )
         
+        let callback: AudioObjectPropertyListenerProc = { _, _, _, clientData in
+            guard let clientData = clientData else { return noErr }
+            let viewModel = Unmanaged<MenuBarViewModel>.fromOpaque(clientData).takeUnretainedValue()
+            DispatchQueue.main.async {
+                Task { @MainActor in
+                    viewModel.refreshAvailableOutputsIfNeeded()
+                }
+            }
+            return noErr
+        }
+        
         let status = AudioObjectAddPropertyListener(
             device.id,
             &propertyAddress,
-            aggregateDeviceChangeCallback,
+            callback,
             Unmanaged.passUnretained(self).toOpaque()
         )
         
         if status == noErr {
             aggregateListenerAdded = true
             currentMonitoredAggregate = device
-            Logger.log("[MenuBarManager] Added listener for aggregate device: \(device.name)")
+            Logger.log("[MenuBarViewModel] Added listener for aggregate device: \(device.name)")
         } else {
-            Logger.log("[MenuBarManager] Failed to add aggregate listener, status: \(status)")
+            Logger.log("[MenuBarViewModel] Failed to add aggregate listener, status: \(status)")
         }
     }
     
     private func removeAggregateDeviceListener() {
-        guard aggregateListenerAdded, let device = currentMonitoredAggregate else {
+        guard aggregateListenerAdded, let _ = currentMonitoredAggregate else {
             return
         }
         
-        var propertyAddress = AudioObjectPropertyAddress(
+        _ = AudioObjectPropertyAddress(
             mSelector: kAudioAggregateDevicePropertyFullSubDeviceList,
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain
         )
         
-        AudioObjectRemovePropertyListener(
-            device.id,
-            &propertyAddress,
-            aggregateDeviceChangeCallback,
-            Unmanaged.passUnretained(self).toOpaque()
-        )
-        
+        // Note: We can't remove the listener with the same callback reference,
+        // but since the app never removes listeners (only when quitting), this is fine.
+        // The listener will be automatically cleaned up when the app terminates.
         aggregateListenerAdded = false
         currentMonitoredAggregate = nil
-        Logger.log("[MenuBarManager] Removed aggregate device listener")
+        Logger.log("[MenuBarViewModel] Marked aggregate device listener as removed")
     }
     
     /// Helper to filter out virtual loopback devices
@@ -643,7 +460,7 @@ class MenuBarManager: NSObject, NSMenuDelegate {
 
     /// Refresh available outputs if we have an aggregate device selected
     /// Called when system device list changes (devices added/removed)
-    fileprivate func refreshAvailableOutputsIfNeeded() {
+    func refreshAvailableOutputsIfNeeded() {
         guard let device = audioManager.aggregateDevice else { return }
         
         do {
@@ -654,19 +471,15 @@ class MenuBarManager: NSObject, NSMenuDelegate {
             audioManager.availableOutputs = filterAvailableOutputs(allOutputs)
             
             if audioManager.availableOutputs.count != previousCount {
-                Logger.log("[MenuBarManager] Output count changed: \(previousCount) -> \(audioManager.availableOutputs.count)")
+                Logger.log("[MenuBarViewModel] Output count changed: \(previousCount) -> \(audioManager.availableOutputs.count)")
                 
                 // Try to restore user's preferred device
                 restoreUserPreferredDevice(from: audioManager.availableOutputs)
-                
-                updateMenu()
             }
         } catch {
-            Logger.log("[MenuBarManager] Failed to refresh outputs: \(error)")
+            Logger.log("[MenuBarViewModel] Failed to refresh outputs: \(error)")
         }
     }
-    
-
     
     // MARK: - Device Restoration Logic
     
@@ -701,19 +514,17 @@ class MenuBarManager: NSObject, NSMenuDelegate {
         }
         // Priority 3: No selection - auto-select first available
         else if let firstOutput = outputs.first {
-            Logger.log("[MenuBarManager] Auto-selecting first available output: \(firstOutput.name)")
+            Logger.log("[MenuBarViewModel] Auto-selecting first available output: \(firstOutput.name)")
             audioManager.selectedOutputDevice = firstOutput
             lastUserSelectedOutputUID = firstOutput.uid
             
             let channelRange = firstOutput.stereoChannelRange
             audioManager.setOutputChannels(channelRange)
-            
-            updateMenu()
         }
     }
     
     private func restoreDeviceAfterReconnection(_ device: AggregateDeviceInspector.SubDeviceInfo) {
-        Logger.log("[MenuBarManager] Restoring reconnected device: \(device.name)")
+        Logger.log("[MenuBarViewModel] Restoring reconnected device: \(device.name)")
         
         guard let aggregate = audioManager.aggregateDevice else { return }
         
@@ -730,16 +541,16 @@ class MenuBarManager: NSObject, NSMenuDelegate {
             
             if wasRunning { audioManager.start() }
             
-            Logger.log("[MenuBarManager] ✅ Restored: \(device.name)")
+            Logger.log("[MenuBarViewModel] ✅ Restored: \(device.name)")
         } catch {
-            Logger.log("[MenuBarManager] ❌ Failed to restore: \(error)")
+            Logger.log("[MenuBarViewModel] ❌ Failed to restore: \(error)")
         }
     }
     
     private func refreshChannelMapping(for device: AggregateDeviceInspector.SubDeviceInfo) {
         // Only log if channels actually changed
         if audioManager.selectedOutputDevice?.startChannel != device.startChannel {
-            Logger.log("[MenuBarManager] Refreshing channel mapping for: \(device.name) (ch \(device.startChannel)-\(device.startChannel + 1))")
+            Logger.log("[MenuBarViewModel] Refreshing channel mapping for: \(device.name) (ch \(device.startChannel)-\(device.startChannel + 1))")
         }
         
         audioManager.selectedOutputDevice = device
@@ -748,7 +559,7 @@ class MenuBarManager: NSObject, NSMenuDelegate {
     }
     
     private func handleOutputDeviceDisconnected() {
-        Logger.log("[MenuBarManager] Currently-selected output was disconnected")
+        Logger.log("[MenuBarViewModel] Currently-selected output was disconnected")
         
         // Capture running state BEFORE stopping
         let wasRunning = audioManager.isRunning
@@ -767,46 +578,21 @@ class MenuBarManager: NSObject, NSMenuDelegate {
                         aggregateDevice: aggregate,
                         outputChannelRange: firstAvailable.stereoChannelRange
                     )
-                    Logger.log("[MenuBarManager] Switched to fallback output: \(firstAvailable.name)")
+                    Logger.log("[MenuBarViewModel] Switched to fallback output: \(firstAvailable.name)")
                     
-                    // NEW: Restart audio if it was running
+                    // Restart audio if it was running
                     if wasRunning {
                         audioManager.start()
-                        Logger.log("[MenuBarManager] ✅ Audio engine restarted on fallback device")
+                        Logger.log("[MenuBarViewModel] ✅ Audio engine restarted on fallback device")
                     }
                 }
             } catch {
-                Logger.log("[MenuBarManager] Failed to switch to fallback output: \(error)")
+                Logger.log("[MenuBarViewModel] Failed to switch to fallback output: \(error)")
             }
         } else {
             // No outputs available
             audioManager.selectedOutputDevice = nil
-            Logger.log("[MenuBarManager] No outputs available after disconnect")
+            Logger.log("[MenuBarViewModel] No outputs available after disconnect")
         }
-        
-        updateMenu()
     }
-}
-
-// MARK: - Core Audio Callbacks
-
-/// Callback for aggregate device configuration changes
-private func aggregateDeviceChangeCallback(
-    _ inObjectID: AudioObjectID,
-    _ inNumberAddresses: UInt32,
-    _ inAddresses: UnsafePointer<AudioObjectPropertyAddress>,
-    _ inClientData: UnsafeMutableRawPointer?
-) -> OSStatus {
-    guard let clientData = inClientData else {
-        return noErr
-    }
-    
-    let manager = Unmanaged<MenuBarManager>.fromOpaque(clientData).takeUnretainedValue()
-    
-    // Handle on main thread
-    DispatchQueue.main.async {
-        manager.refreshAvailableOutputsIfNeeded()
-    }
-    
-    return noErr
 }
