@@ -44,6 +44,19 @@ struct SettingsView: View {
         }
         .frame(minWidth: 500, idealWidth: 500, maxWidth: 500)
         .frame(minHeight: 400, idealHeight: 560)
+        .toolbar {
+            ToolbarItem(placement: .principal) {
+                 HStack(spacing: 8) {
+                     Image("AirwaveIcon")
+                         .resizable()
+                         .scaledToFit()
+                         .frame(width: 20, height: 20)
+                     Text("Airwave Settings")
+                         .font(.system(size: 13, weight: .semibold))
+                 }
+                 .padding(.horizontal, 16)
+            }
+        }
         .onAppear {
             refreshAvailableOutputs()
             diagnosticsManager.refresh()
@@ -222,8 +235,7 @@ struct SettingsView: View {
                                 }
                             )) {
                                 ForEach(audioManager.availableOutputs, id: \.device.id) { output in
-                                    let channelInfo = "Ch \(output.startChannel)-\(output.endChannel)"
-                                    Text("\(output.name) (\(channelInfo))").tag(output.device.id as AudioDeviceID?)
+                                    Text(output.name).tag(output.device.id as AudioDeviceID?)
                                 }
                             }
                             .labelsHidden()
@@ -342,6 +354,9 @@ struct SettingsView: View {
             }
             .background(.ultraThinMaterial)
             .cornerRadius(6)
+            
+            getMoreHRIRSection
+                .padding(.top, 8)
         }
     }
 
@@ -426,16 +441,10 @@ struct SettingsView: View {
                     status: diagnosticsManager.diagnostics.virtualDriverInstalled ? .complete : .missing,
                     actionTitle: diagnosticsManager.diagnostics.virtualDriverInstalled ? nil : "Install BlackHole",
                     action: {
-                        if let url = URL(string: "https://existential.audio/blackhole/") {
-                            NSWorkspace.shared.open(url)
-                        }
+                        NSWorkspace.shared.open(ConfigurationManager.ExternalLinks.blackHoleDownload)
                     },
-                    secondaryActionTitle: "Setup Guide",
-                    secondaryAction: {
-                        if let url = URL(string: "https://github.com") {
-                            NSWorkspace.shared.open(url)
-                        }
-                    }
+                    secondaryActionLink: ConfigurationManager.ExternalLinks.setupGuide,
+                    secondaryActionLinkTitle: "Setup Guide"
                 )
                 
                 Divider().padding(.leading, 30)
@@ -471,6 +480,38 @@ struct SettingsView: View {
             .background(.ultraThinMaterial)
             .cornerRadius(6)
         }
+    }
+
+    private var getMoreHRIRSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("Get HRIRs")
+                    .font(.system(size: 12, weight: .semibold))
+                
+                Spacer()
+                
+                Link(destination: ConfigurationManager.ExternalLinks.hrtfDatabase) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "link")
+                            .font(.system(size: 10))
+                        Text("Open HRTF Database")
+                    }
+                }
+                .font(.system(size: 11))
+                .foregroundStyle(.blue)
+            }
+            
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Airwave works with any HRIR compatible with HeSuVi. These HRIR files can be obtained for free from the HRTF database.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .lineSpacing(2)
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.ultraThinMaterial)
+        .cornerRadius(6)
     }
     
     private var helpSection: some View {
@@ -668,6 +709,8 @@ struct ChecklistRow: View {
     var action: (() -> Void)?
     var secondaryActionTitle: String?
     var secondaryAction: (() -> Void)?
+    var secondaryActionLink: URL?
+    var secondaryActionLinkTitle: String?
     
     var body: some View {
         HStack(spacing: 10) {
@@ -686,8 +729,20 @@ struct ChecklistRow: View {
             
             Spacer()
             
-            // Secondary action button (always shown if provided)
-            if let secondaryActionTitle = secondaryActionTitle, let secondaryAction = secondaryAction {
+            // Secondary action link (if provided)
+            if let secondaryActionLink = secondaryActionLink, let secondaryActionLinkTitle = secondaryActionLinkTitle {
+                Link(destination: secondaryActionLink) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "link")
+                            .font(.system(size: 10))
+                        Text(secondaryActionLinkTitle)
+                    }
+                }
+                .font(.system(size: 11))
+                .foregroundStyle(.blue)
+            }
+            // Secondary action button (if provided and no link)
+            else if let secondaryActionTitle = secondaryActionTitle, let secondaryAction = secondaryAction {
                 Button(secondaryActionTitle) {
                     secondaryAction()
                 }

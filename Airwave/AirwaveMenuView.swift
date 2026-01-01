@@ -369,7 +369,7 @@ struct AirwaveMenuView: View {
                             VStack(spacing: 0) {
                                 ForEach(audioManager.availableOutputs, id: \.uid) { output in
                                     DeviceRow(
-                                        name: "\(output.name) (Ch \(output.startChannel)-\(output.endChannel))",
+                                        name: output.name,
                                         isSelected: output.device.id == audioManager.selectedOutputDevice?.device.id
                                     ) {
                                         viewModel.selectOutputDevice(output)

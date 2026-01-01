@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>ExternalLinks</key>
+	<dict>
+		<key>BlackHoleDownload</key>
+		<string>https://existential.audio/blackhole/</string>
+		<key>HRTFDatabase</key>
+		<string>https://airtable.com/embed/appac4r1cu9UpBNAN/shrpUAbtyZxhDDMjg/tblopH2GznvFipWjq/viwnouWPGDuYEd8Go</string>
+		<key>SetupGuide</key>
+		<string>https://github.com/sallliisa/MacHRIR</string>
+	</dict>
+</dict>
+</plist>

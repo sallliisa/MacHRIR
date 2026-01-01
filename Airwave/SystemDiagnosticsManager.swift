@@ -318,7 +318,7 @@ class SystemDiagnosticsManager: ObservableObject {
             lines.append("✅ Virtual Audio Driver: \(d.detectedVirtualDrivers.joined(separator: ", "))")
         } else {
             lines.append("❌ Virtual Audio Driver: Not installed")
-            lines.append("   → Install BlackHole from https://existential.audio/blackhole/")
+            lines.append("   → Install BlackHole from \(ConfigurationManager.ExternalLinks.blackHoleDownload.absoluteString)")
         }
         
         // Aggregate devices
