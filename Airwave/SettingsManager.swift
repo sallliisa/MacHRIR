@@ -38,9 +38,12 @@ struct AppSettings: Codable {
 }
 
 /// Manages application settings persistence using UserDefaults
+/// **IMPORTANT**: Always use `SettingsManager.shared` to avoid cache divergence.
+/// Each instance maintains its own cache and debounce timer, which can lead to
+/// stale reads or lost saves if multiple instances are used.
 class SettingsManager {
     
-    // Singleton instance for easy access
+    // Singleton instance - use this to ensure settings consistency
     static let shared = SettingsManager()
 
     private let defaults = UserDefaults.standard
@@ -72,15 +75,58 @@ class SettingsManager {
             return .default
         }
         
-        // Try to decode new schema
+        // Try to decode current schema
         if let settings = try? JSONDecoder().decode(AppSettings.self, from: data) {
             Logger.log("[Settings] Loaded settings from disk")
             return settings
         }
         
-        // Migration: If we fail to decode, it might be the old schema.
-        Logger.log("[Settings] Failed to decode settings (possible schema mismatch). Resetting to defaults.")
+        // Migration: Attempt to migrate from legacy schema versions
+        Logger.log("[Settings] Failed to decode with current schema, attempting migration...")
+        
+        if let migratedSettings = attemptMigration(from: data) {
+            Logger.log("[Settings] Successfully migrated settings from legacy schema")
+            // Save migrated settings in new format
+            saveSettings(migratedSettings)
+            return migratedSettings
+        }
+        
+        // Last resort: Data is corrupted or truly incompatible
+        Logger.log("[Settings] ⚠️ Migration failed. Data may be corrupted. Resetting to defaults.")
         return .default
+    }
+    
+    /// Attempt to migrate settings from known legacy schema versions
+    private func attemptMigration(from data: Data) -> AppSettings? {
+        // Define legacy schema for migration
+        struct LegacyAppSettings: Codable {
+            var aggregateDeviceID: UInt32?
+            var selectedOutputDeviceID: UInt32?
+            var activePresetID: UUID?
+            var autoStart: Bool
+            var bufferSize: Int
+            var targetSampleRate: Double
+        }
+        
+        // Try to decode legacy schema (without UID fields)
+        if let legacy = try? JSONDecoder().decode(LegacyAppSettings.self, from: data) {
+            Logger.log("[Settings] Detected legacy schema (device IDs only)")
+            // Convert to new schema - UIDs will be nil, user will need to reselect
+            return AppSettings(
+                aggregateDeviceID: legacy.aggregateDeviceID,
+                selectedOutputDeviceID: legacy.selectedOutputDeviceID,
+                aggregateDeviceUID: nil,
+                selectedOutputDeviceUID: nil,
+                activePresetID: legacy.activePresetID,
+                autoStart: legacy.autoStart,
+                bufferSize: legacy.bufferSize,
+                targetSampleRate: legacy.targetSampleRate
+            )
+        }
+        
+        // Add more migration paths here as schema evolves
+        
+        return nil
     }
 
     /// Save settings to memory cache and schedule disk write

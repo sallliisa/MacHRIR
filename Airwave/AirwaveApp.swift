@@ -11,19 +11,23 @@ import SwiftUI
 struct AirwaveApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     
-    // Initialize view model to trigger settings loading and device monitoring
+    // Ensure the singleton initializes early and is injected into the view tree.
     @StateObject private var viewModel = MenuBarViewModel.shared
     
     var body: some Scene {
         MenuBarExtra {
             AirwaveMenuView()
+                .environmentObject(viewModel)
         } label: {
             MenuBarLabel()
         }
         .menuBarExtraStyle(.window)
-        
-        Settings {
-            EmptyView()
+
+        Window("Settings", id: "settings") {
+            SettingsView()
         }
+        .windowResizability(.contentSize)
+        .defaultSize(width: 500, height: 560)
+        .keyboardShortcut(",", modifiers: .command)
     }
 }

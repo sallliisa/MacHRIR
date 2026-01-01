@@ -289,8 +289,9 @@ struct ActionRow: View {
 
 struct AirwaveMenuView: View {
     @ObservedObject private var audioManager = AudioGraphManager.shared
-    @ObservedObject private var viewModel = MenuBarViewModel.shared
+    @EnvironmentObject private var viewModel: MenuBarViewModel
     @ObservedObject private var diagnosticsManager = SystemDiagnosticsManager.shared
+    @Environment(\.openWindow) private var openWindow
     
     // Accordion state
     enum ExpandedAccordion {
@@ -405,7 +406,8 @@ struct AirwaveMenuView: View {
                     "Settings",
                     showWarning: !diagnosticsManager.diagnostics.isFullyConfigured
                 ) {
-                    viewModel.showSettings()
+                    viewModel.closeMenuBarPopover()
+                    openWindow(id: "settings")
                 }
             }
             .padding(.vertical, 4)
@@ -428,6 +430,13 @@ struct AirwaveMenuView: View {
         .frame(width: 280)
         .padding(.vertical, 4)
         .padding(.horizontal, 6)
+        .alert(item: $viewModel.selectionAlert) { alert in
+            Alert(
+                title: Text(alert.title),
+                message: Text(alert.message),
+                dismissButton: .default(Text("OK"))
+            )
+        }
     }
 }
 
@@ -435,4 +444,3 @@ struct AirwaveMenuView: View {
     AirwaveMenuView()
         .frame(height: 350)
 }
-

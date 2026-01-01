@@ -6,9 +6,11 @@
 //
 
 import AppKit
-import SwiftUI
 
 class AppDelegate: NSObject, NSApplicationDelegate {
+    private var signalSources: [DispatchSourceSignal] = []
+    private var terminationHandled = false
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Safety check: Restore system audio if app crashed while on BlackHole
         checkAndRestoreSystemAudio()
@@ -19,41 +21,35 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     
     /// Setup signal handlers to catch termination from Xcode or system
     private func setupSignalHandlers() {
-        // Handle SIGTERM (graceful termination request)
-        signal(SIGTERM) { _ in
-            Logger.log("[AppDelegate] Caught SIGTERM - restoring audio before exit")
-            AppDelegate.handleTermination()
-            exit(0)
-        }
-        
-        // Handle SIGINT (Ctrl+C or Xcode stop)
-        signal(SIGINT) { _ in
-            Logger.log("[AppDelegate] Caught SIGINT - restoring audio before exit")
-            AppDelegate.handleTermination()
-            exit(0)
+        let signals: [Int32] = [SIGTERM, SIGINT, SIGQUIT]
+        for signalValue in signals {
+            signal(signalValue, SIG_IGN)
+            let source = DispatchSource.makeSignalSource(signal: signalValue, queue: .main)
+            source.setEventHandler { [weak self] in
+                self?.handleTermination(signal: signalValue)
+            }
+            source.resume()
+            signalSources.append(source)
         }
     }
     
     /// Handle termination - restore system audio with volume matching
-    private static func handleTermination() {
+    private func handleTermination(signal: Int32? = nil) {
+        guard !terminationHandled else { return }
+        terminationHandled = true
+
+        if let signalValue = signal {
+            Logger.log("[AppDelegate] Caught signal \(signalValue) - restoring audio before exit")
+        }
+
         let audioManager = AudioGraphManager.shared
         if audioManager.isRunning {
-            // Synchronously restore audio (can't use async in signal handler)
-            let deviceManager = AudioDeviceManager.shared
-            
-            // Get current BlackHole volume
-            if let currentOutput = deviceManager.getSystemDefaultOutputDevice(),
-               let currentVolume = deviceManager.getDeviceVolume(currentOutput),
-               let selectedOutput = audioManager.selectedOutputDevice {
-                
-                // Set volume on physical device
-                _ = deviceManager.setDeviceVolume(selectedOutput.device, volume: currentVolume)
-                
-                // Switch back to physical device
-                _ = deviceManager.setSystemDefaultOutputDevice(selectedOutput.device)
-                
-                Logger.log("[AppDelegate] ✅ Audio restored on signal termination")
-            }
+            Logger.log("[AppDelegate] Stopping audio engine before termination")
+            audioManager.stop()
+        }
+
+        if signal != nil {
+            NSApp.terminate(nil)
         }
     }
     
@@ -89,10 +85,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     
     func applicationWillTerminate(_ notification: Notification) {
         // If audio engine is running, stop it (which will restore system audio)
-        let audioManager = AudioGraphManager.shared
-        if audioManager.isRunning {
-            Logger.log("[AppDelegate] App terminating with engine running - stopping gracefully")
-            audioManager.stop()
-        }
+        handleTermination()
     }
 }

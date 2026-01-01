@@ -7,14 +7,17 @@
 
 import SwiftUI
 import AppKit
+private typealias PlatformColor = NSColor
+import AppKit
 import CoreAudio
 
 struct SettingsView: View {
-    @StateObject private var diagnosticsManager = SystemDiagnosticsManager.shared
-    @StateObject private var launchAtLogin = LaunchAtLoginManager.shared
-    @StateObject private var hrirManager = HRIRManager.shared
-    @StateObject private var audioManager = AudioGraphManager.shared
-    @StateObject private var deviceManager = AudioDeviceManager.shared
+    // Shared singleton instances - not owned by this view
+    @ObservedObject private var diagnosticsManager = SystemDiagnosticsManager.shared
+    @ObservedObject private var launchAtLogin = LaunchAtLoginManager.shared
+    @ObservedObject private var hrirManager = HRIRManager.shared
+    @ObservedObject private var audioManager = AudioGraphManager.shared
+    @ObservedObject private var deviceManager = AudioDeviceManager.shared
     
     // Inspector for aggregate device info
     private let inspector = AggregateDeviceInspector()
@@ -22,38 +25,28 @@ struct SettingsView: View {
     // Static UUID for "None" option in HRIR picker
     private static let nonePresetID = UUID(uuidString: "00000000-0000-0000-0000-000000000000")!
     
-    // Alert state for when user tries to enable audio without aggregate device
-    @State private var showNoDeviceAlert = false
-    
-    // Native macOS colors
-    private let backgroundColor = Color(red: 31/255, green: 30/255, blue: 29/255)
-    private let groupedBackgroundColor = Color(red: 37/255, green: 36/255, blue: 36/255)
-    
     var body: some View {
-        VStack(spacing: 0) {
-            ScrollView {
-                VStack(spacing: 20) {
-                    // Status Card (at the very top)
-                    overallStatusCard
-                    
-                    // General Settings
-                    generalSection
+        ScrollView {
+            VStack(spacing: 20) {
+                // Status Card (at the very top)
+                overallStatusCard
+                
+                // General Settings
+                generalSection
 
-                    // Application Settings
-                    applicationSection
-                    
-                    // Diagnostics
-                    checklistSection
-                }
-                .padding(20)
+                // Application Settings
+                applicationSection
+                
+                // Diagnostics
+                checklistSection
             }
-            .background(backgroundColor)
+            .padding(20)
         }
-        .frame(width: 500)
-        .frame(minHeight: 400, idealHeight: 560, maxHeight: .infinity)
-        .background(backgroundColor)
+        .frame(minWidth: 500, idealWidth: 500, maxWidth: 500)
+        .frame(minHeight: 400, idealHeight: 560)
         .onAppear {
             refreshAvailableOutputs()
+            diagnosticsManager.refresh()
         }
         .onChange(of: audioManager.aggregateDevice?.id) {
             refreshAvailableOutputs()
@@ -347,7 +340,7 @@ struct SettingsView: View {
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
             }
-            .background(groupedBackgroundColor)
+            .background(.ultraThinMaterial)
             .cornerRadius(6)
         }
     }
@@ -383,7 +376,7 @@ struct SettingsView: View {
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
             }
-            .background(groupedBackgroundColor)
+            .background(.ultraThinMaterial)
             .cornerRadius(6)
         }
     }
@@ -475,7 +468,7 @@ struct SettingsView: View {
                     }
                 )
             }
-            .background(groupedBackgroundColor)
+            .background(.ultraThinMaterial)
             .cornerRadius(6)
         }
     }
@@ -492,7 +485,7 @@ struct SettingsView: View {
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(groupedBackgroundColor)
+        .background(.ultraThinMaterial)
         .cornerRadius(6)
     }
     
@@ -751,51 +744,12 @@ struct AggregateDeviceRow: View {
         .padding(12)
         .background(
             RoundedRectangle(cornerRadius: 8)
-                .fill(Color(nsColor: .controlBackgroundColor))
+                .fill(.ultraThinMaterial)
         )
         .overlay(
             RoundedRectangle(cornerRadius: 8)
                 .strokeBorder(Color.primary.opacity(0.1), lineWidth: 1)
         )
-    }
-}
-
-// MARK: - Diagnostics Window Controller
-
-class SettingsWindowController: NSWindowController {
-    static let shared = SettingsWindowController()
-    
-    private init() {
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 500, height: 560),
-            styleMask: [.titled, .closable, .resizable],
-            backing: .buffered,
-            defer: false
-        )
-        window.title = "Airwave Settings"
-        window.center()
-        window.contentView = NSHostingView(rootView: SettingsView())
-        window.isReleasedWhenClosed = false
-        window.backgroundColor = NSColor(red: 31/255, green: 30/255, blue: 29/255, alpha: 1.0)
-        
-        // Lock width to 500, allow vertical resizing only
-        window.minSize = NSSize(width: 500, height: 400)
-        window.maxSize = NSSize(width: 500, height: CGFloat.greatestFiniteMagnitude)
-        
-        super.init(window: window)
-    }
-    
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
-    
-    func showSettings() {
-        // Refresh diagnostics when opening
-        SystemDiagnosticsManager.shared.refresh()
-        
-        window?.center()
-        window?.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
     }
 }
 

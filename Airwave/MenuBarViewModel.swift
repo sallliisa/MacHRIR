@@ -13,6 +13,12 @@ import CoreAudio
 @MainActor
 class MenuBarViewModel: ObservableObject {
     static let shared = MenuBarViewModel()
+
+    struct SelectionAlert: Identifiable {
+        let id = UUID()
+        let title: String
+        let message: String
+    }
     
     // Managers
     let audioManager = AudioGraphManager.shared
@@ -25,6 +31,8 @@ class MenuBarViewModel: ObservableObject {
     private var isInitialized = false
     private var isRestoringState = false
     private var saveDebounceTimer: Timer?
+
+    @Published var selectionAlert: SelectionAlert?
     
     // Track the last user-selected output by UID (persistent across reconnections)
     private var lastUserSelectedOutputUID: String?
@@ -146,11 +154,10 @@ class MenuBarViewModel: ObservableObject {
         // Validate first
         let validation = validateAggregateDevice(device)
         if !validation.valid {
-            let alert = NSAlert()
-            alert.messageText = "Invalid Aggregate Device"
-            alert.informativeText = validation.reason ?? "Unknown error"
-            alert.addButton(withTitle: "OK")
-            alert.runModal()
+            selectionAlert = SelectionAlert(
+                title: "Invalid Aggregate Device",
+                message: validation.reason ?? "Unknown error"
+            )
             return
         }
         
@@ -219,13 +226,8 @@ class MenuBarViewModel: ObservableObject {
         NSApp.orderFrontStandardAboutPanel(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
-    
-    func showSettings() {
-        closeMenuBarPopover()
-        SettingsWindowController.shared.showSettings()
-    }
-    
-    private func closeMenuBarPopover() {
+
+    func closeMenuBarPopover() {
         // Close the menubar popover by finding and closing the menu window
         if let window = NSApp.windows.first(where: { $0.className.contains("MenuBar") || $0.className.contains("Popover") }) {
             window.close()

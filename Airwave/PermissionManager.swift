@@ -9,11 +9,19 @@ class PermissionManager {
     
     // Checks permission and requests if necessary.
     // Returns true if authorized, false otherwise.
-    // Also posts a notification when permission status changes.
+    // Always posts a notification with current status to keep UI in sync.
     func checkAndRequestMicrophonePermission(completion: @escaping (Bool) -> Void) {
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
         case .authorized:
-            completion(true)
+            // Post notification even when already authorized
+            DispatchQueue.main.async {
+                NotificationCenter.default.post(
+                    name: PermissionManager.microphonePermissionDidChangeNotification,
+                    object: nil,
+                    userInfo: ["granted": true]
+                )
+                completion(true)
+            }
             
         case .notDetermined:
             AVCaptureDevice.requestAccess(for: .audio) { granted in
@@ -29,10 +37,25 @@ class PermissionManager {
             }
             
         case .denied, .restricted:
-            completion(false)
+            // Post notification even when denied/restricted
+            DispatchQueue.main.async {
+                NotificationCenter.default.post(
+                    name: PermissionManager.microphonePermissionDidChangeNotification,
+                    object: nil,
+                    userInfo: ["granted": false]
+                )
+                completion(false)
+            }
             
         @unknown default:
-            completion(false)
+            DispatchQueue.main.async {
+                NotificationCenter.default.post(
+                    name: PermissionManager.microphonePermissionDidChangeNotification,
+                    object: nil,
+                    userInfo: ["granted": false]
+                )
+                completion(false)
+            }
         }
     }
     
