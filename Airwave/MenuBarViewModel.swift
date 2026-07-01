@@ -332,11 +332,10 @@ class MenuBarViewModel: ObservableObject {
                    let input = audioManager.availableInputs.first(where: { $0.uid == inputUID }) {
                     Logger.log("[MenuBarViewModel] Restoring input device: \(input.name)")
                     audioManager.selectedInputDevice = input
-                    
+
                     // Set the input channel range
                     if let inputRange = input.inputChannelRange {
-                        let stereoRange = inputRange.lowerBound..<min(inputRange.lowerBound + 2, inputRange.upperBound)
-                        audioManager.setInputChannels(stereoRange)
+                        audioManager.setInputChannels(inputRange)
                     }
                     
                     // Persist the restored input device
@@ -345,11 +344,10 @@ class MenuBarViewModel: ObservableObject {
                     // Fallback to first input
                     Logger.log("[MenuBarViewModel] Auto-selecting first input device: \(firstInput.name)")
                     audioManager.selectedInputDevice = firstInput
-                    
+
                     // Set the input channel range
                     if let inputRange = firstInput.inputChannelRange {
-                        let stereoRange = inputRange.lowerBound..<min(inputRange.lowerBound + 2, inputRange.upperBound)
-                        audioManager.setInputChannels(stereoRange)
+                        audioManager.setInputChannels(inputRange)
                     }
                     
                     // Persist the auto-selected input device
@@ -377,7 +375,8 @@ class MenuBarViewModel: ObservableObject {
            let preset = hrirManager.presets.first(where: { $0.id == presetID }) {
             Logger.log("[MenuBarViewModel] Restoring preset: \(preset.name)")
             let sampleRate = 48000.0
-            let inputLayout = InputLayout.detect(channelCount: 2)
+            let channelCount = audioManager.selectedInputDevice?.inputChannelRange?.count ?? 2
+            let inputLayout = InputLayout.detect(channelCount: channelCount)
             hrirManager.activatePreset(preset, targetSampleRate: sampleRate, inputLayout: inputLayout)
         }
         

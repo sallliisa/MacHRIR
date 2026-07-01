@@ -92,6 +92,14 @@ struct InputLayout {
         case 8: return .surround71
         case 12: return .atmos714
         default:
+            // Virtual audio drivers (e.g. BlackHole 16ch) often expose more channels
+            // than the source uses, so fall back to the largest known surround layout
+            // that fits within what's available
+            if channelCount > 12 { return .atmos714 }
+            if channelCount > 8 { return .surround71 }
+            if channelCount > 6 { return .surround51 }
+            if channelCount > 2 { return .stereo }
+
             // Create a generic layout with custom speakers
             let channels = (0..<channelCount).map { VirtualSpeaker.custom("Ch\($0)") }
             return InputLayout(channels: channels, name: "\(channelCount) Channel")

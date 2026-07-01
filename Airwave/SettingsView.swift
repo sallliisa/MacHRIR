@@ -394,7 +394,8 @@ struct SettingsView: View {
                         set: { newID in
                             if let preset = hrirManager.presets.first(where: { $0.id == newID }) {
                                 let sampleRate = 48000.0
-                                let inputLayout = InputLayout.detect(channelCount: 2)
+                                let channelCount = audioManager.selectedInputDevice?.inputChannelRange?.count ?? 2
+                                let inputLayout = InputLayout.detect(channelCount: channelCount)
                                 hrirManager.activatePreset(preset, targetSampleRate: sampleRate, inputLayout: inputLayout)
                             } else {
                                 hrirManager.activePreset = nil
@@ -829,11 +830,10 @@ struct SettingsView: View {
         }
         
         audioManager.selectedInputDevice = input
-        
-        // Set the input channel range to the first 2 channels of the selected input device
+
+        // Set the input channel range to the selected input device's full range
         if let inputRange = input.inputChannelRange {
-            let stereoRange = inputRange.lowerBound..<min(inputRange.lowerBound + 2, inputRange.upperBound)
-            audioManager.setInputChannels(stereoRange)
+            audioManager.setInputChannels(inputRange)
         }
         
         // Only switch system audio output if explicitly requested AND audio engine is running
@@ -922,8 +922,7 @@ struct SettingsView: View {
                 
                 // Update the input channel range in case it changed
                 if let inputRange = stillExists.inputChannelRange {
-                    let stereoRange = inputRange.lowerBound..<min(inputRange.lowerBound + 2, inputRange.upperBound)
-                    audioManager.setInputChannels(stereoRange)
+                    audioManager.setInputChannels(inputRange)
                 }
                 
                 // Persist the input device to ensure it's saved

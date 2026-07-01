@@ -834,24 +834,21 @@ private func renderCallback(
         }
     }
     
-    // Determine which input channels to use (first 2 from selected input device)
+    // Determine which input channels to use (selected range from input device)
     let inputRange = manager.selectedInputChannelRange ?? 0..<min(2, inputChannelCount)
     let leftInputChannel = inputRange.lowerBound
     let rightInputChannel = min(leftInputChannel + 1, inputRange.upperBound - 1)
-    
+
     let shouldProcess = manager.hrirManager?.isConvolutionActive ?? false
-    
+
     if shouldProcess, let channelPtrs = manager.inputChannelBufferPtrs {
-        // Create a temporary 2-channel pointer array for stereo input
-        let stereoInputPtrs = UnsafeMutablePointer<UnsafeMutablePointer<Float>>.allocate(capacity: 2)
-        defer { stereoInputPtrs.deallocate() }
-        
-        stereoInputPtrs[0] = channelPtrs[leftInputChannel]
-        stereoInputPtrs[1] = channelPtrs[rightInputChannel]
-        
+        // Feed every channel in the selected range so multi-channel presets
+        // (5.1/7.1) can drive more than just the first two speakers
+        let channelCount = max(0, min(inputRange.count, inputChannelCount - leftInputChannel))
+
         manager.hrirManager?.processAudio(
-            inputPtrs: stereoInputPtrs,
-            inputCount: 2,  // Always stereo input
+            inputPtrs: channelPtrs.advanced(by: leftInputChannel),
+            inputCount: channelCount,
             leftOutput: manager.outputStereoLeftPtr,
             rightOutput: manager.outputStereoRightPtr,
             frameCount: frameCount

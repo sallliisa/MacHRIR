@@ -403,7 +403,8 @@ struct AirwaveMenuView: View {
                                 isSelected: preset.id == hrirManager.activePreset?.id
                             ) {
                                 let sampleRate = 48000.0
-                                let inputLayout = InputLayout.detect(channelCount: 2)
+                                let channelCount = audioManager.selectedInputDevice?.inputChannelRange?.count ?? 2
+                                let inputLayout = InputLayout.detect(channelCount: channelCount)
                                 hrirManager.activatePreset(preset, targetSampleRate: sampleRate, inputLayout: inputLayout)
                             }
                         }
