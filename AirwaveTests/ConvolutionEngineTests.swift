@@ -58,3 +58,97 @@ final class ConvolutionEngineTests: XCTestCase {
         XCTAssertTrue(zip(first, second).allSatisfy { abs($0.0 - $0.1) < 0.0001 })
     }
 }
+
+/// Golden-output guard for the convolution refactor: partitioned convolution
+/// must match a direct time-domain reference, including a non-power-of-2
+/// partition count (1200 taps at block 512 = 3 partitions).
+final class ConvolutionCharacterizationTests: XCTestCase {
+    private let blockSize = 512
+    private let blocks = 8
+
+    func testPartitionedConvolutionMatchesDirectConvolutionForBothEars() {
+        let leftIR = Self.impulseResponse(taps: 1_200, seed: 7)
+        let rightIR = Self.impulseResponse(taps: 1_200, seed: 11)
+        let input = Self.noise(count: blockSize * blocks, seed: 3)
+
+        let (left, right) = Self.render(input: input, leftIR: leftIR, rightIR: rightIR, blockSize: blockSize)
+        let expectedLeft = Self.directConvolution(input: input, impulseResponse: leftIR)
+        let expectedRight = Self.directConvolution(input: input, impulseResponse: rightIR)
+
+        XCTAssertEqual(left.count, input.count)
+        XCTAssertLessThan(Self.maximumError(left, expectedLeft), 1e-4)
+        XCTAssertLessThan(Self.maximumError(right, expectedRight), 1e-4)
+    }
+
+    // MARK: - Helpers
+
+    /// Runs the production engine block by block. Updated alongside the engine API.
+    private static func render(
+        input: [Float],
+        leftIR: [Float],
+        rightIR: [Float],
+        blockSize: Int
+    ) -> ([Float], [Float]) {
+        let leftEngine = ConvolutionEngine(hrirSamples: leftIR, blockSize: blockSize)!
+        let rightEngine = ConvolutionEngine(hrirSamples: rightIR, blockSize: blockSize)!
+        var left = [Float](repeating: 0, count: input.count)
+        var right = [Float](repeating: 0, count: input.count)
+        input.withUnsafeBufferPointer { inputPtr in
+            left.withUnsafeMutableBufferPointer { leftPtr in
+                right.withUnsafeMutableBufferPointer { rightPtr in
+                    for block in stride(from: 0, to: input.count, by: blockSize) {
+                        leftEngine.process(
+                            input: inputPtr.baseAddress!.advanced(by: block),
+                            output: leftPtr.baseAddress!.advanced(by: block)
+                        )
+                        rightEngine.process(
+                            input: inputPtr.baseAddress!.advanced(by: block),
+                            output: rightPtr.baseAddress!.advanced(by: block)
+                        )
+                    }
+                }
+            }
+        }
+        return (left, right)
+    }
+
+    private static func directConvolution(input: [Float], impulseResponse: [Float]) -> [Float] {
+        var output = [Float](repeating: 0, count: input.count)
+        for n in 0..<input.count {
+            var sum: Float = 0
+            for k in 0..<min(impulseResponse.count, n + 1) {
+                sum += impulseResponse[k] * input[n - k]
+            }
+            output[n] = sum
+        }
+        return output
+    }
+
+    private static func maximumError(_ actual: [Float], _ expected: [Float]) -> Float {
+        zip(actual, expected).reduce(0) { max($0, abs($1.0 - $1.1)) }
+    }
+
+    private static func impulseResponse(taps: Int, seed: UInt64) -> [Float] {
+        var generator = LinearCongruential(seed: seed)
+        return (0..<taps).map { index in
+            let decay = 1 - Float(index) / Float(taps)
+            return 0.02 * decay * generator.nextUnit()
+        }
+    }
+
+    private static func noise(count: Int, seed: UInt64) -> [Float] {
+        var generator = LinearCongruential(seed: seed)
+        return (0..<count).map { _ in generator.nextUnit() }
+    }
+
+    private struct LinearCongruential {
+        private var state: UInt64
+
+        init(seed: UInt64) { state = seed &* 6_364_136_223_846_793_005 &+ 1 }
+
+        mutating func nextUnit() -> Float {
+            state = state &* 6_364_136_223_846_793_005 &+ 1_442_695_040_888_963_407
+            return Float(Int32(truncatingIfNeeded: state >> 32)) / Float(Int32.max)
+        }
+    }
+}
