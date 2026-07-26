@@ -11,16 +11,7 @@ struct MenuBarLabel: View {
 private struct MenuHeaderSection: View {
     var body: some View {
         HStack(spacing: 8) {
-            Image("AirwaveMark")
-                .renderingMode(.template)
-                .resizable()
-                .scaledToFit()
-                .foregroundStyle(.primary)
-                .frame(width: 16, height: 16)
-
-            Text("Airwave")
-                .font(.system(size: 13, weight: .semibold))
-
+            AirwaveBrandHeader(markSize: 16, titleFont: .system(size: 13, weight: .semibold))
             Spacer()
         }
         .padding(.horizontal, 14)

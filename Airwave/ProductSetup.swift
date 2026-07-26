@@ -1,4 +1,5 @@
 import AppKit
+import SwiftUI
 import Combine
 import Foundation
 
@@ -41,6 +42,18 @@ final class MenuBarVisibilityManager: ObservableObject {
         isVisible = value
     }
 
+    /// The one binding every toggle uses. The async hop keeps the activation
+    /// policy change out of the SwiftUI update that flipped the switch.
+    var visibilityBinding: Binding<Bool> {
+        Binding(
+            get: { self.isVisible },
+            set: { value in
+                guard value != self.isVisible else { return }
+                DispatchQueue.main.async { self.setVisible(value) }
+            }
+        )
+    }
+
     func applyActivationPolicy() {
         ApplicationLifecycleCoordinator.shared.updateActivationPolicy()
     }
@@ -80,6 +93,10 @@ enum OnboardingStepV2: String, CaseIterable, Codable {
     case systemAudio
     case hrirPreset
     case liveHealth
+
+    /// Position in the setup flow; used for page numbering and slide direction.
+    var index: Int { Self.allCases.firstIndex(of: self) ?? 0 }
+    var pageNumber: Int { index + 1 }
 
     var title: String {
         switch self {

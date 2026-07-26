@@ -254,6 +254,81 @@ private final class ManagementClock {
     var value = Date(timeIntervalSince1970: 1_700_000_000)
 }
 
+extension DeviceProfileManagementTests {
+    func testRowsCacheRebuildsWhenProfilesChange() throws {
+        let context = try ManagementContext()
+        seedProfile(context.profiles, profileDevice(id: 1, uid: "current", name: "Current"))
+        let coordinator = context.coordinator()
+        XCTAssertEqual(coordinator.rows.map(\.id), ["current"])
+
+        seedProfile(context.profiles, profileDevice(id: 2, uid: "usb", name: "USB"))
+        context.profiles.updateAvailableOutputs([
+            profileDevice(id: 1, uid: "current", name: "Current"),
+            profileDevice(id: 2, uid: "usb", name: "USB")
+        ])
+        pumpMainRunLoop()
+
+        XCTAssertEqual(Set(coordinator.rows.map(\.id)), ["current", "usb"])
+    }
+
+    func testForgettingADeviceDropsItsCachedRowImmediately() throws {
+        let context = try ManagementContext()
+        seedProfile(context.profiles, profileDevice(id: 1, uid: "current", name: "Current"))
+        seedProfile(context.profiles, profileDevice(id: 2, uid: "usb", name: "USB"))
+        context.profiles.observeCurrentOutput(profileDevice(id: 1, uid: "current", name: "Current"))
+        let coordinator = context.coordinator()
+        pumpMainRunLoop()
+        XCTAssertTrue(coordinator.rows.contains { $0.id == "usb" })
+
+        coordinator.requestForget(deviceUID: "usb")
+        XCTAssertTrue(coordinator.confirmPendingAction())
+
+        XCTAssertFalse(coordinator.rows.contains { $0.id == "usb" })
+    }
+}
+
+@MainActor
+final class SettingsNavigationTests: XCTestCase {
+    func testShowingSetupKeepsReturnAffordanceOnlyWhenAllowed() {
+        let state = SettingsWindowContentState()
+        XCTAssertEqual(state.mode, .settings)
+
+        state.show(.setup, canReturnToSettings: true)
+        XCTAssertEqual(state.mode, .setup)
+        XCTAssertTrue(state.canReturnToSettings)
+
+        state.show(.setup, canReturnToSettings: false)
+        XCTAssertFalse(state.canReturnToSettings)
+    }
+
+    func testReturningToSettingsResetsThePageAndClearsTheReturnAffordance() {
+        let state = SettingsWindowContentState()
+        state.selectSettingsPage(.devices)
+        state.show(.setup, canReturnToSettings: true)
+
+        state.show(.settings)
+
+        XCTAssertEqual(state.mode, .settings)
+        XCTAssertEqual(state.settingsPage, .general)
+        XCTAssertFalse(state.canReturnToSettings)
+    }
+
+    func testSelectingAPageLeavesTheModeAlone() {
+        let state = SettingsWindowContentState()
+        state.selectSettingsPage(.equalizer)
+
+        XCTAssertEqual(state.settingsPage, .equalizer)
+        XCTAssertEqual(state.mode, .settings)
+    }
+}
+
+/// The rows cache rebuilds on the next run-loop turn (objectWillChange fires
+/// before the change lands), so tests drain the main run loop.
+@MainActor
+private func pumpMainRunLoop() {
+    RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+}
+
 private func profileDevice(
     id: UInt64,
     uid: String,

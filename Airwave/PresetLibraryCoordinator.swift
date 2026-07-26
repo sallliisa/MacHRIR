@@ -182,8 +182,11 @@ final class PresetLibraryCoordinator: ObservableObject {
         panel.allowedContentTypes = [configuration.contentType]
         panel.title = configuration.panelTitle
         panel.message = configuration.panelMessage
-        guard panel.runModal() == .OK else { return }
-        receive(panel.urls)
+        // Non-modal: the settings window keeps drawing while the panel is up.
+        panel.begin { [weak self] response in
+            guard response == .OK else { return }
+            MainActor.assumeIsolated { self?.receive(panel.urls) }
+        }
     }
 
     func showInFinder() {

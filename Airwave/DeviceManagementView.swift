@@ -29,12 +29,18 @@ nonisolated struct DeviceManagementConfirmation: Equatable {
 @MainActor
 final class DeviceManagementCoordinator: ObservableObject {
     @Published private(set) var pendingConfirmation: DeviceManagementConfirmation?
+    /// Cached so a render pass never rebuilds the list, and so callers can
+    /// observe row changes instead of diffing a computed property.
+    @Published private(set) var rows: [DeviceManagementRow] = []
+    /// Fires when a cache rebuild dropped the row a caller had selected.
+    var onRowsInvalidatedSelection: ((String) -> Void)?
 
     private let profileManager: DeviceProfileManager
     private let hrirManager: HRIRManager
     private let equalizerManager: EqualizerManager
     private let resetOperation: (String) -> Bool
     private let forgetOperation: (String) -> Bool
+    private var cancellables: Set<AnyCancellable> = []
 
     init(
         profileManager: DeviceProfileManager,
@@ -52,9 +58,21 @@ final class DeviceManagementCoordinator: ObservableObject {
         self.forgetOperation = forgetOperation ?? { [weak profileManager] uid in
             profileManager?.forgetProfile(deviceUID: uid) ?? false
         }
+        rebuildRows()
+        profileManager.objectWillChange
+            .merge(with: hrirManager.objectWillChange, equalizerManager.objectWillChange)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.rebuildRows() }
+            .store(in: &cancellables)
     }
 
-    var rows: [DeviceManagementRow] {
+    private func rebuildRows() {
+        let rebuilt = makeRows()
+        guard rebuilt != rows else { return }
+        rows = rebuilt
+    }
+
+    private func makeRows() -> [DeviceManagementRow] {
         profileManager.sortedProfiles.map { profile in
             let hrirName = profile.hrirPresetID.flatMap { id in
                 hrirManager.presets.first { $0.id == id }?.name
@@ -124,6 +142,7 @@ final class DeviceManagementCoordinator: ObservableObject {
         guard let confirmation = pendingConfirmation else { return false }
         pendingConfirmation = nil
 
+        defer { rebuildRows() }
         switch confirmation.action {
         case .reset:
             return resetOperation(confirmation.deviceUID)
@@ -189,10 +208,9 @@ struct DeviceManagementView: View {
         }
         .onAppear { selectedDeviceUID = nil }
         .onChange(of: coordinator.rows) { _, rows in
-            guard let selectedDeviceUID,
-                  rows.contains(where: { $0.id == selectedDeviceUID }) else {
+            // The cache rebuilt; drop a selection whose device is gone.
+            if let selectedDeviceUID, !rows.contains(where: { $0.id == selectedDeviceUID }) {
                 self.selectedDeviceUID = nil
-                return
             }
         }
         .confirmationDialog(

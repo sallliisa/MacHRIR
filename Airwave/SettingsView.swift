@@ -1,199 +1,10 @@
 import AppKit
 import SwiftUI
 
-private struct SettingsWindowAccessor: NSViewRepresentable {
-    func makeNSView(context: Context) -> NSView {
-        let view = NSView()
-        DispatchQueue.main.async {
-            guard let window = view.window else { return }
-            SettingsWindowPresenter.register(window)
-        }
-        return view
-    }
-
-    func updateNSView(_ nsView: NSView, context: Context) {
-        DispatchQueue.main.async {
-            guard let window = nsView.window else { return }
-            SettingsWindowPresenter.register(window)
-        }
-    }
-}
-
-struct SettingsWindowContent: View {
-    @ObservedObject var state: SettingsWindowContentState
-    @ObservedObject private var onboarding = OnboardingViewModel.shared
-    @ObservedObject private var hrirManager = HRIRManager.shared
-    @ObservedObject private var profiles = DeviceProfileManager.shared
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var onboardingNavigationDirection: OnboardingNavigationDirection = .forward
-    @State private var isQuitConfirmationPresented = false
-
-    var body: some View {
-        ZStack {
-            pageContent
-
-            VStack(spacing: 0) {
-                AirwaveTopBar {
-                    topBarCenter
-                } trailing: {
-                    topBarTrailing
-                }
-                .animation(
-                    reduceMotion ? nil : AirwaveMotion.pageTransition,
-                    value: state.settingsPage
-                )
-                Spacer(minLength: 0)
-            }
-        }
-        .frame(width: SettingsWindowPresenter.contentSize.width, height: SettingsWindowPresenter.contentSize.height)
-        .background(SettingsWindowAccessor())
-        .clipped()
-        .confirmationDialog(
-            "Quit Airwave?",
-            isPresented: $isQuitConfirmationPresented
-        ) {
-            Button("Quit Airwave", role: .destructive) {
-                ApplicationLifecycleCoordinator.shared.requestExplicitQuit()
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("Audio processing will stop and Airwave will quit.")
-        }
-    }
-
-    @ViewBuilder
-    private var pageContent: some View {
-        switch state.mode {
-        case .setup:
-            OnboardingView(
-                viewModel: OnboardingViewModel.shared,
-                navigationDirection: $onboardingNavigationDirection,
-                canReturnToSettings: state.canReturnToSettings,
-                onComplete: { state.show(.settings) },
-                onReturnToSettings: { state.show(.settings) },
-                onOpenEqualizerSettings: {
-                    state.show(.settings)
-                    state.selectSettingsPage(.equalizer)
-                }
-            )
-            .transition(pageRevealTransition)
-        case .settings:
-            SettingsView(showSetup: {
-                OnboardingViewModel.shared.prepareForPresentation(.voluntary)
-                state.show(.setup, canReturnToSettings: true)
-            }, page: Binding(
-                get: { state.settingsPage },
-                set: { state.selectSettingsPage($0) }
-            ))
-            .transition(pageRevealTransition)
-        }
-    }
-
-    private var pageRevealTransition: AnyTransition {
-        reduceMotion ? .opacity : .airwaveBlurScaleReveal
-    }
-
-    @ViewBuilder
-    private var topBarCenter: some View {
-        switch state.mode {
-        case .setup:
-            OnboardingProgressIndicator(
-                currentStep: onboarding.currentStep,
-                permission: onboarding.permissionPresentation,
-                hasCaptureFailureGuidance: onboarding.captureFailureGuidance != nil,
-                hasPreset: profiles.currentProfile?.hrirPresetID != nil,
-                isReady: onboarding.runtime.isSetupHealthy,
-                onSelect: { step in
-                    onboardingNavigationDirection = onboardingIndex(of: step) > onboardingIndex(of: onboarding.currentStep)
-                        ? .forward
-                        : .backward
-                    withAnimation(onboardingPageAnimation) {
-                        onboarding.selectStep(step)
-                    }
-                }
-            )
-        case .settings:
-            if state.settingsPage == .general || state.settingsPage == .equalizer {
-                deviceMenu
-            }
-        }
-    }
-
-    private var deviceMenu: some View {
-        Group {
-            if let editing = profiles.editingTarget {
-                Menu {
-                    ForEach(profiles.targets) { target in
-                        Button {
-                            profiles.selectEditingDevice(uid: target.deviceUID)
-                        } label: {
-                            HStack {
-                                if target.deviceUID == profiles.editingDeviceUID { Image(systemName: "checkmark") }
-                                Text(target.deviceName)
-                                if target.isCurrent { Text("Current") }
-                            }
-                        }
-                    }
-                } label: {
-                    HStack(spacing: 5) {
-                        Text(editing.deviceName)
-                        Image(systemName: "chevron.down").font(.caption2)
-                    }
-                    .frame(minWidth: 44, minHeight: 44)
-                    .contentShape(Rectangle())
-                    .foregroundStyle(.primary)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Editing audio device")
-                .accessibilityValue(editing.deviceName)
-            } else {
-                Text("No Supported Output").foregroundStyle(.secondary)
-                    .accessibilityLabel("No supported output device")
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var topBarTrailing: some View {
-        switch state.mode {
-        case .setup:
-            Text("Page \(onboardingPageNumber) of \(OnboardingStepV2.allCases.count)")
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(.secondary)
-        case .settings:
-            Button {
-                isQuitConfirmationPresented = true
-            } label: {
-                Image(systemName: "power")
-                    .frame(width: 44, height: 44)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .font(.system(size: 12, weight: .medium))
-            .foregroundStyle(.red)
-            .accessibilityLabel("Quit Airwave and stop processing")
-            .help("Quit Airwave and stop audio processing")
-        }
-    }
-
-    private var onboardingPageNumber: Int {
-        (OnboardingStepV2.allCases.firstIndex(of: onboarding.currentStep) ?? 0) + 1
-    }
-
-    private var onboardingPageAnimation: Animation {
-        reduceMotion ? .easeOut(duration: 0.16) : AirwaveMotion.pageTransition
-    }
-
-    private func onboardingIndex(of step: OnboardingStepV2) -> Int {
-        OnboardingStepV2.allCases.firstIndex(of: step) ?? 0
-    }
-}
-
 struct SettingsView: View {
     var showSetup: () -> Void
-    var page: Binding<SettingsPage> = .constant(.general)
+    var page: Binding<SettingsPage>
     @ObservedObject private var onboarding = OnboardingViewModel.shared
-    @ObservedObject private var runtime = AudioRuntimeState.shared
     @ObservedObject private var hrirManager = HRIRManager.shared
     @ObservedObject private var profiles = DeviceProfileManager.shared
     @ObservedObject private var launchAtLogin = LaunchAtLoginManager.shared
@@ -219,7 +30,7 @@ struct SettingsView: View {
 
                             #if DEBUG
                             if page.wrappedValue == .general {
-                                debugSection
+                                SettingsDebugHealthSection()
                             }
                             #endif
                         }
@@ -233,7 +44,10 @@ struct SettingsView: View {
             }
 
         }
-        .frame(width: 900, height: 600)
+        .frame(
+            width: SettingsWindowPresenter.contentSize.width,
+            height: SettingsWindowPresenter.contentSize.height
+        )
         .preferredColorScheme(.dark)
     }
 
@@ -344,10 +158,10 @@ struct SettingsView: View {
             AirwaveHRIRPicker(
                 manager: hrirManager,
                 selectedID: profiles.editingProfile?.hrirPresetID,
-                onSelect: { profiles.setHRIRPresetID($0?.id) },
+                onSelect: { viewModel.selectEditingHRIRPreset($0) },
                 onDelete: { preset in
                     if profiles.editingProfile?.hrirPresetID == preset.id {
-                        profiles.setHRIRPresetID(nil)
+                        viewModel.selectEditingHRIRPreset(nil)
                     }
                 }
             )
@@ -406,55 +220,37 @@ struct SettingsView: View {
     private var applicationPage: some View {
         VStack(alignment: .leading, spacing: AirwaveLayout.sectionContentSpacing) {
             VStack(spacing: 0) {
-                HStack(spacing: 10) {
-                    Image(systemName: "play.circle.fill")
-                        .font(.system(size: 13))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 20)
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text("Launch at Login").font(.system(size: 12))
-                        Text("Open Airwave automatically when you log in")
-                            .font(.system(size: 11))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
-                    Spacer()
+                AirwaveSettingsRow(
+                    icon: "play.circle.fill",
+                    title: "Launch at Login",
+                    subtitle: "Open Airwave automatically when you log in"
+                ) {
                     Toggle("", isOn: $launchAtLogin.isEnabled)
                         .labelsHidden()
                         .toggleStyle(.switch)
                 }
-                .padding(.horizontal, AirwaveLayout.rowHorizontalPadding)
-                .padding(.vertical, AirwaveLayout.rowVerticalPadding)
 
                 Divider().padding(.leading, 30)
 
-                HStack(spacing: 10) {
-                    Image(systemName: "menubar.rectangle").font(.system(size: 13)).foregroundStyle(.secondary).frame(width: 20)
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text("Show in Menu Bar").font(.system(size: 12))
-                        Text("Keep Airwave in the macOS menu bar.").font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
-                    }
-                    Spacer()
-                    Toggle("", isOn: menuBarVisibilityBinding).labelsHidden().toggleStyle(.switch)
+                AirwaveSettingsRow(
+                    icon: "menubar.rectangle",
+                    title: "Show in Menu Bar",
+                    subtitle: "Keep Airwave available from the macOS menu bar."
+                ) {
+                    Toggle("", isOn: menuVisibility.visibilityBinding)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
                 }
-                .padding(.horizontal, AirwaveLayout.rowHorizontalPadding)
-                .padding(.vertical, AirwaveLayout.rowVerticalPadding)
 
                 Divider().padding(.leading, 30)
 
-                HStack(spacing: 10) {
-                    Image(systemName: updateIconName)
-                        .font(.system(size: 13))
-                        .foregroundStyle(updateIconColor)
-                        .frame(width: 20)
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text("Software Update").font(.system(size: 12))
-                        Text(updateStatusText)
-                            .font(.system(size: 11))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(2)
-                    }
-                    Spacer()
+                AirwaveSettingsRow(
+                    icon: updateIconName,
+                    title: "Software Update",
+                    subtitle: updateStatusText,
+                    iconColor: updateIconColor,
+                    subtitleLineLimit: 2
+                ) {
                     if case .checking = updateManager.state {
                         ProgressView().controlSize(.small)
                     } else {
@@ -470,8 +266,6 @@ struct SettingsView: View {
                         .disabled(!updateManager.canCheckForUpdates)
                     }
                 }
-                .padding(.horizontal, AirwaveLayout.rowHorizontalPadding)
-                .padding(.vertical, AirwaveLayout.rowVerticalPadding)
 
                 Divider().padding(.leading, 30)
 
@@ -487,69 +281,6 @@ struct SettingsView: View {
         }
     }
 
-    #if DEBUG
-    private var debugSection: some View {
-        VStack(alignment: .leading, spacing: AirwaveLayout.sectionContentSpacing) {
-            AirwaveSectionHeader(
-                title: "Debug Health",
-                subtitle: "Inspect the native process-tap runtime."
-            )
-
-            VStack(spacing: 0) {
-                debugRow("Status", value: runtime.status.title)
-                Divider().padding(.leading, 30)
-                debugRow("Detail", value: runtime.status.detail)
-                Divider().padding(.leading, 30)
-                debugRow("Current Output", value: runtime.currentOutput?.name ?? "Not available")
-                Divider().padding(.leading, 30)
-                debugRow("Sample Rate", value: sampleRate)
-                Divider().padding(.leading, 30)
-                debugRow("Process Tap", value: runtime.status.isProcessing ? "Active" : "Inactive")
-
-                if RuntimeMenuPresentation.make(from: runtime.status).canRetry {
-                    Divider().padding(.leading, 30)
-                    settingsActionRow(
-                        icon: "arrow.clockwise",
-                        title: "Retry Audio Setup",
-                        subtitle: "Ask the runtime to retry immediately",
-                        buttonTitle: "Retry",
-                        action: viewModel.retryAudio
-                    )
-                }
-                if runtime.status == .needsPermission {
-                    Divider().padding(.leading, 30)
-                    settingsActionRow(
-                        icon: "lock.open.fill",
-                        title: "System Audio Capture",
-                        subtitle: "Open the macOS privacy setting for Airwave",
-                        buttonTitle: "Open Settings",
-                        action: viewModel.openSystemAudioRecordingSettings
-                    )
-                }
-            }
-            .background(AirwavePalette.raised, in: RoundedRectangle(cornerRadius: AirwaveLayout.cardCornerRadius))
-        }
-    }
-
-    private func debugRow(_ title: String, value: String) -> some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: "ladybug.fill")
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
-                .frame(width: 20)
-            Text(title).font(.system(size: 12))
-            Spacer()
-            Text(value)
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.trailing)
-                .frame(maxWidth: 360, alignment: .trailing)
-        }
-        .padding(.horizontal, AirwaveLayout.rowHorizontalPadding)
-        .padding(.vertical, AirwaveLayout.rowVerticalPadding)
-    }
-    #endif
-
     private func settingsActionRow(
         icon: String,
         title: String,
@@ -558,45 +289,24 @@ struct SettingsView: View {
         showsWarning: Bool = false,
         action: @escaping () -> Void
     ) -> some View {
-        HStack(spacing: 10) {
-            Image(systemName: icon)
-                .font(.system(size: 12))
-                .foregroundStyle(showsWarning ? Color.orange : Color.secondary)
-                .frame(width: 20)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(title).font(.system(size: 12))
-                Text(subtitle).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
-            }
-            Spacer()
+        AirwaveSettingsRow(
+            icon: icon,
+            title: title,
+            subtitle: subtitle,
+            showsWarning: showsWarning
+        ) {
             Button(buttonTitle, action: action)
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
                 .fixedSize()
                 .frame(width: 180, alignment: .trailing)
         }
-        .padding(.horizontal, AirwaveLayout.rowHorizontalPadding)
-        .padding(.vertical, AirwaveLayout.rowVerticalPadding)
-        .background(showsWarning ? Color.orange.opacity(0.10) : Color.clear)
     }
 
     private var onboardingNeedsAttention: Bool {
         onboarding.needsSetupAttention
     }
 
-    private var sampleRate: String {
-        guard let rate = runtime.currentOutput?.nominalSampleRate else { return "—" }
-        return "\(Int(rate.rounded())) Hz"
-    }
-
-    private var menuBarVisibilityBinding: Binding<Bool> {
-        Binding(
-            get: { menuVisibility.isVisible },
-            set: { value in
-                guard value != menuVisibility.isVisible else { return }
-                DispatchQueue.main.async { menuVisibility.setVisible(value) }
-            }
-        )
-    }
 
     private var updateStatusText: String {
         switch updateManager.state {
