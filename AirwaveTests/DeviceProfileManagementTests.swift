@@ -151,7 +151,7 @@ final class DeviceProfileManagementTests: XCTestCase {
         let context = try ManagementContext()
         let source = context.root.appendingPathComponent("Room.wav")
         try writeTestWAV(to: source)
-        let coordinator = HRIRSettingsCoordinator(manager: context.hrir)
+        let coordinator = PresetLibraryCoordinator(manager: context.hrir, configuration: .hrir)
 
         coordinator.receive([source])
         let imported = try XCTUnwrap(context.hrir.presets.first)
@@ -162,7 +162,7 @@ final class DeviceProfileManagementTests: XCTestCase {
         coordinator.resolveConflicts(.keepExisting)
         XCTAssertNil(coordinator.message)
 
-        XCTAssertTrue(coordinator.delete(imported, decision: .confirm))
+        XCTAssertTrue(coordinator.delete(context.hrir.libraryDeletion(for: imported), decision: .confirm))
         XCTAssertNil(coordinator.message)
     }
 
@@ -170,7 +170,7 @@ final class DeviceProfileManagementTests: XCTestCase {
         let context = try ManagementContext()
         let invalid = context.root.appendingPathComponent("broken.txt")
         try Data("not a WAV\n".utf8).write(to: invalid)
-        let coordinator = HRIRSettingsCoordinator(manager: context.hrir)
+        let coordinator = PresetLibraryCoordinator(manager: context.hrir, configuration: .hrir)
 
         coordinator.receive([invalid])
 
