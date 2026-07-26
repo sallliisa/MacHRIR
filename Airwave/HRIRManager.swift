@@ -92,6 +92,338 @@ import AppKit
 
 import os
 
+/// Fixed-capacity hand-off slots. The render thread never releases a renderer
+/// state; it parks it here and the control thread drains it.
+nonisolated struct SpatialRetirementSlots {
+    private var first: HRIRManager.RendererState?
+    private var second: HRIRManager.RendererState?
+    private var third: HRIRManager.RendererState?
+    private var fourth: HRIRManager.RendererState?
+
+    var isEmpty: Bool { first == nil && second == nil && third == nil && fourth == nil }
+
+    mutating func insert(_ state: HRIRManager.RendererState) -> Bool {
+        if first == nil { first = state; return true }
+        if second == nil { second = state; return true }
+        if third == nil { third = state; return true }
+        if fourth == nil { fourth = state; return true }
+        return false
+    }
+
+    /// Moves everything it can into `other`, keeping whatever does not fit.
+    /// Allocation-free so the render thread can call it.
+    mutating func moveAll(into other: inout SpatialRetirementSlots) -> Bool {
+        var moved = true
+        if let value = first {
+            if other.insert(value) { first = nil } else { moved = false }
+        }
+        if let value = second {
+            if other.insert(value) { second = nil } else { moved = false }
+        }
+        if let value = third {
+            if other.insert(value) { third = nil } else { moved = false }
+        }
+        if let value = fourth {
+            if other.insert(value) { fourth = nil } else { moved = false }
+        }
+        return moved
+    }
+
+    mutating func clear() {
+        first = nil
+        second = nil
+        third = nil
+        fourth = nil
+    }
+}
+
+/// Blends the outgoing and incoming renderer states on the render thread so a
+/// preset change never has to tear down the Core Audio chain.
+///
+/// The incoming state is fed input for `primeLength` frames before it is blended
+/// in: `RealtimeAudioProcessor` emits silence until it holds one full DSP block,
+/// and blending that silence would click. Only after the priming window does the
+/// equal-power ramp run.
+nonisolated final class SpatialRendererCrossfader {
+    typealias RendererState = HRIRManager.RendererState
+
+    let primeLength: Int
+    let fadeLength: Int
+    let maxFramesPerCallback: Int
+
+    private let fadeOutGain: UnsafeMutablePointer<Float>
+    private let fadeInGain: UnsafeMutablePointer<Float>
+    private let fromLeftScratch: UnsafeMutablePointer<Float>
+    private let fromRightScratch: UnsafeMutablePointer<Float>
+    private let toLeftScratch: UnsafeMutablePointer<Float>
+    private let toRightScratch: UnsafeMutablePointer<Float>
+
+    private let retirementLock = OSAllocatedUnfairLock<SpatialRetirementSlots>(initialState: SpatialRetirementSlots())
+    private let resetLock = OSAllocatedUnfairLock<Bool>(initialState: false)
+
+    // Render-thread-only state.
+    private var activeState: RendererState?
+    private var observedState: RendererState?
+    private var fadeFrom: RendererState?
+    private var fadeTo: RendererState?
+    private var pendingTarget: RendererState?
+    private var hasPendingTarget = false
+    private var isFading = false
+    private var fadeFrame = 0
+    private var primeFrames = 0
+    private var pendingRetirement = SpatialRetirementSlots()
+
+    init(primeLength: Int, fadeLength: Int = 1_024, maxFramesPerCallback: Int = 4_096) {
+        precondition(primeLength >= 0)
+        precondition(fadeLength > 0)
+        precondition(maxFramesPerCallback > 0)
+        self.primeLength = primeLength
+        self.fadeLength = fadeLength
+        self.maxFramesPerCallback = maxFramesPerCallback
+
+        fadeOutGain = UnsafeMutablePointer<Float>.allocate(capacity: fadeLength)
+        fadeInGain = UnsafeMutablePointer<Float>.allocate(capacity: fadeLength)
+        for index in 0..<fadeLength {
+            let theta = (Double(index + 1) / Double(fadeLength)) * (.pi / 2)
+            fadeOutGain[index] = Float(cos(theta))
+            fadeInGain[index] = Float(sin(theta))
+        }
+
+        fromLeftScratch = UnsafeMutablePointer<Float>.allocate(capacity: maxFramesPerCallback)
+        fromRightScratch = UnsafeMutablePointer<Float>.allocate(capacity: maxFramesPerCallback)
+        toLeftScratch = UnsafeMutablePointer<Float>.allocate(capacity: maxFramesPerCallback)
+        toRightScratch = UnsafeMutablePointer<Float>.allocate(capacity: maxFramesPerCallback)
+    }
+
+    deinit {
+        fadeOutGain.deallocate()
+        fadeInGain.deallocate()
+        fromLeftScratch.deallocate()
+        fromRightScratch.deallocate()
+        toLeftScratch.deallocate()
+        toRightScratch.deallocate()
+    }
+
+    /// True while spatial output must stay in the callback path, including the
+    /// fade back to passthrough after a preset is removed.
+    var isRenderingSpatialAudio: Bool {
+        isFading || activeState?.renderers.isEmpty == false
+    }
+
+    var hasObservedRenderers: Bool { observedState?.renderers.isEmpty == false }
+
+    /// Releases states retired by the render thread. Call from the control thread.
+    func drainRetiredStates() {
+        retirementLock.withLock { slots in
+            slots.clear()
+        }
+    }
+
+    /// Drops the render-thread state without fading. Used when the pipeline is
+    /// torn down, so a rebuilt pipeline never resumes a stale preset.
+    func requestReset() {
+        resetLock.withLock { requested in
+            requested = true
+        }
+    }
+
+    // BEGIN REALTIME CALLBACK
+    func observe(_ published: RendererState?) {
+        guard published !== observedState else { return }
+        observedState = published
+        if isFading {
+            if published !== fadeTo {
+                pendingTarget = published
+                hasPendingTarget = true
+            } else {
+                pendingTarget = nil
+                hasPendingTarget = false
+            }
+        } else if !pendingRetirement.isEmpty {
+            pendingTarget = published
+            hasPendingTarget = true
+        } else if published !== activeState {
+            beginFade(to: published)
+        }
+    }
+
+    func process(
+        inputLeft: UnsafePointer<Float>,
+        inputRight: UnsafePointer<Float>?,
+        leftOutput: UnsafeMutablePointer<Float>,
+        rightOutput: UnsafeMutablePointer<Float>,
+        frameCount: Int
+    ) {
+        guard frameCount > 0 else { return }
+        precondition(frameCount <= maxFramesPerCallback)
+        applyPendingReset()
+        flushPendingRetirement()
+
+        var offset = 0
+        while offset < frameCount {
+            guard isFading else {
+                render(
+                    activeState,
+                    inputLeft: inputLeft.advanced(by: offset),
+                    inputRight: inputRight?.advanced(by: offset),
+                    leftOutput: leftOutput.advanced(by: offset),
+                    rightOutput: rightOutput.advanced(by: offset),
+                    frameCount: frameCount - offset
+                )
+                return
+            }
+
+            let boundary = fadeFrame < primeFrames ? primeFrames : primeFrames + fadeLength
+            let segment = min(boundary - fadeFrame, frameCount - offset)
+            let segmentInputLeft = inputLeft.advanced(by: offset)
+            let segmentInputRight = inputRight?.advanced(by: offset)
+
+            if fadeFrame < primeFrames {
+                render(
+                    fadeFrom,
+                    inputLeft: segmentInputLeft,
+                    inputRight: segmentInputRight,
+                    leftOutput: leftOutput.advanced(by: offset),
+                    rightOutput: rightOutput.advanced(by: offset),
+                    frameCount: segment
+                )
+                // Warm the incoming adapter; its output is still silence-padded.
+                render(
+                    fadeTo,
+                    inputLeft: segmentInputLeft,
+                    inputRight: segmentInputRight,
+                    leftOutput: toLeftScratch,
+                    rightOutput: toRightScratch,
+                    frameCount: segment
+                )
+            } else {
+                render(
+                    fadeFrom,
+                    inputLeft: segmentInputLeft,
+                    inputRight: segmentInputRight,
+                    leftOutput: fromLeftScratch,
+                    rightOutput: fromRightScratch,
+                    frameCount: segment
+                )
+                render(
+                    fadeTo,
+                    inputLeft: segmentInputLeft,
+                    inputRight: segmentInputRight,
+                    leftOutput: toLeftScratch,
+                    rightOutput: toRightScratch,
+                    frameCount: segment
+                )
+                let base = fadeFrame - primeFrames
+                for index in 0..<segment {
+                    let outGain = fadeOutGain[base + index]
+                    let inGain = fadeInGain[base + index]
+                    leftOutput[offset + index] = fromLeftScratch[index] * outGain + toLeftScratch[index] * inGain
+                    rightOutput[offset + index] = fromRightScratch[index] * outGain + toRightScratch[index] * inGain
+                }
+            }
+
+            fadeFrame += segment
+            offset += segment
+            if fadeFrame == primeFrames + fadeLength { finishFade() }
+        }
+    }
+    // END REALTIME CALLBACK
+
+    @inline(__always)
+    private func render(
+        _ state: RendererState?,
+        inputLeft: UnsafePointer<Float>,
+        inputRight: UnsafePointer<Float>?,
+        leftOutput: UnsafeMutablePointer<Float>,
+        rightOutput: UnsafeMutablePointer<Float>,
+        frameCount: Int
+    ) {
+        guard let state, !state.renderers.isEmpty else {
+            memcpy(leftOutput, inputLeft, frameCount * MemoryLayout<Float>.size)
+            memcpy(rightOutput, inputRight ?? inputLeft, frameCount * MemoryLayout<Float>.size)
+            return
+        }
+        state.processor.process(
+            inputLeft: inputLeft,
+            inputRight: inputRight,
+            leftOutput: leftOutput,
+            rightOutput: rightOutput,
+            frameCount: frameCount
+        )
+    }
+
+    private func beginFade(to target: RendererState?) {
+        guard target !== activeState else { return }
+        fadeFrom = activeState
+        fadeTo = target
+        fadeFrame = 0
+        primeFrames = target == nil ? 0 : primeLength
+        isFading = true
+    }
+
+    private func finishFade() {
+        let outgoing = fadeFrom
+        activeState = fadeTo
+        fadeFrom = nil
+        fadeTo = nil
+        fadeFrame = 0
+        primeFrames = 0
+        isFading = false
+        if let outgoing, !retire(outgoing) { return }
+        startPendingFadeIfNeeded()
+    }
+
+    private func startPendingFadeIfNeeded() {
+        guard hasPendingTarget else { return }
+        let pending = pendingTarget
+        pendingTarget = nil
+        hasPendingTarget = false
+        if pending !== activeState { beginFade(to: pending) }
+    }
+
+    private func applyPendingReset() {
+        guard let requested = resetLock.withLockIfAvailable({ requested -> Bool in
+            let value = requested
+            requested = false
+            return value
+        }), requested else {
+            return
+        }
+        if let state = activeState { _ = retire(state) }
+        if let state = fadeTo, state !== activeState { _ = retire(state) }
+        if let state = pendingTarget, state !== activeState, state !== fadeTo { _ = retire(state) }
+        activeState = nil
+        observedState = nil
+        fadeFrom = nil
+        fadeTo = nil
+        pendingTarget = nil
+        hasPendingTarget = false
+        isFading = false
+        fadeFrame = 0
+        primeFrames = 0
+    }
+
+    @discardableResult
+    private func retire(_ state: RendererState) -> Bool {
+        if pendingRetirement.isEmpty,
+           retirementLock.withLockIfAvailable({ slots in slots.insert(state) }) == true {
+            return true
+        }
+        _ = pendingRetirement.insert(state)
+        return false
+    }
+
+    private func flushPendingRetirement() {
+        guard !pendingRetirement.isEmpty else { return }
+        guard retirementLock.withLockIfAvailable({ slots in
+            pendingRetirement.moveAll(into: &slots)
+        }) == true else {
+            return
+        }
+        startPendingFadeIfNeeded()
+    }
+}
+
 /// Manages HRIR presets and multi-channel convolution processing
 class HRIRManager: ObservableObject {
     
@@ -132,7 +464,11 @@ class HRIRManager: ObservableObject {
     
     // Writers publish immutable state under one lock. Render thread makes one non-blocking snapshot attempt.
     nonisolated private let stateLock = OSAllocatedUnfairLock<RendererState?>(initialState: nil)
-    nonisolated(unsafe) private var audioThreadState: RendererState?
+    // Render-thread blend between the outgoing and incoming state. A preset
+    // change never stops the pipeline; it publishes a new state and fades.
+    nonisolated private let crossfader = SpatialRendererCrossfader(
+        primeLength: HRIRManager.processingBlockSize
+    )
 
     private var activationTask: DispatchWorkItem?
     private var activationGeneration = 0
@@ -146,7 +482,7 @@ class HRIRManager: ObservableObject {
         set { stateLock.withLock { $0 = newValue } }
     }
     
-    private let processingBlockSize: Int = 512  // Balance between latency (~10.7ms @ 48kHz) and CPU efficiency
+    nonisolated static let processingBlockSize: Int = 512  // Balance between latency (~10.7ms @ 48kHz) and CPU efficiency
 
     private let presetsDirectory: URL
     private let fileManager: FileManager
@@ -339,7 +675,7 @@ class HRIRManager: ObservableObject {
         activationGeneration += 1
         let generation = activationGeneration
         inFlightActivationKey = activationKey
-        let blockSize = processingBlockSize
+        let blockSize = Self.processingBlockSize
         let cancellationToken = ActivationCancellationToken()
         activationCancellationToken = cancellationToken
         activationCompletion = completion
@@ -453,6 +789,9 @@ class HRIRManager: ObservableObject {
         guard let preset = activePreset else { return }
         let key = PresetActivationKey(preset: preset, targetSampleRate: targetSampleRate, inputLayout: inputLayout)
         if key != currentActivationKey {
+            // Device configuration changed; the old convolvers no longer match.
+            crossfader.requestReset()
+            crossfader.drainRetiredStates()
             rendererState = nil
             currentActivationKey = nil
         }
@@ -460,7 +799,12 @@ class HRIRManager: ObservableObject {
     }
 
     /// Cancel activation and atomically publish passthrough state.
-    func deactivatePreset() {
+    /// - Parameter immediate: drop render-thread state instead of fading out.
+    ///   Pipeline teardown uses this so a rebuilt pipeline never resumes a stale
+    ///   preset; user-facing preset removal fades.
+    func deactivatePreset(immediate: Bool = false) {
+        if immediate { crossfader.requestReset() }
+        crossfader.drainRetiredStates()
         activationTask?.cancel()
         activationTask = nil
         activationCancellationToken?.cancel()
@@ -487,7 +831,8 @@ class HRIRManager: ObservableObject {
         completion: ((HRIRActivationResult) -> Void)?
     ) {
         guard generation == activationGeneration else { return }
-        rendererState = RendererState(renderers: renderers, blockSize: processingBlockSize)
+        crossfader.drainRetiredStates()
+        rendererState = RendererState(renderers: renderers, blockSize: Self.processingBlockSize)
         currentActivationKey = key
         inFlightActivationKey = nil
         activationTask = nil
@@ -514,18 +859,19 @@ class HRIRManager: ObservableObject {
         completion?(.failure(message))
     }
 
-    /// Process selected stereo input through convolution without render-thread allocation.
+    private enum StateRead {
+        case available(RendererState?)
+    }
+
+    /// Read-only for the crossfader: the graph also queries this from the main
+    /// thread, so it must never advance render-thread state.
     nonisolated func hasPublishedRendererForAudioCallback() -> Bool {
-        var state = audioThreadState
-        enum StateRead {
-            case available(RendererState?)
-        }
+        if crossfader.isRenderingSpatialAudio { return true }
         if let read = stateLock.withLockIfAvailable({ StateRead.available($0) }),
            case .available(let publishedState) = read {
-            state = publishedState
-            audioThreadState = publishedState
+            return publishedState?.renderers.isEmpty == false
         }
-        return state?.renderers.isEmpty == false
+        return crossfader.hasObservedRenderers
     }
 
     nonisolated func processAudio(
@@ -536,35 +882,23 @@ class HRIRManager: ObservableObject {
         frameCount: Int
     ) {
         // A writer can never stall the render thread. A failed attempt keeps prior immutable state.
-        var state = audioThreadState
-        enum StateRead {
-            case available(RendererState?)
-        }
-        if let read = stateLock.withLockIfAvailable({ StateRead.available($0) }) {
-            if case .available(let publishedState) = read {
-                state = publishedState
-                audioThreadState = publishedState
-            }
+        if let read = stateLock.withLockIfAvailable({ StateRead.available($0) }),
+           case .available(let publishedState) = read {
+            crossfader.observe(publishedState)
         }
 
-        guard let state, !state.renderers.isEmpty else {
-            // Passthrough mode - simple copy
-            memcpy(leftOutput, inputLeft, frameCount * MemoryLayout<Float>.size)
-            if let inputRight {
-                memcpy(rightOutput, inputRight, frameCount * MemoryLayout<Float>.size)
-            } else {
-                memcpy(rightOutput, inputLeft, frameCount * MemoryLayout<Float>.size)
-            }
-            return
-        }
-
-        state.processor.process(
+        crossfader.process(
             inputLeft: inputLeft,
             inputRight: inputRight,
             leftOutput: leftOutput,
             rightOutput: rightOutput,
             frameCount: frameCount
         )
+    }
+
+    /// Releases renderer states handed back by the render thread.
+    func drainRetiredStates() {
+        crossfader.drainRetiredStates()
     }
 
 
