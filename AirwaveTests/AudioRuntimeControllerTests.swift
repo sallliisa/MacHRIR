@@ -119,6 +119,81 @@ final class AudioRuntimeControllerTests: XCTestCase {
         XCTAssertEqual(h.state.status, .starting)
     }
 
+    func testConflictingAppSuspendsProcessingAndReportsIssue() {
+        let h = Harness(effect: true)
+        h.pipelines.automaticEvent = nil
+        h.controller.launch(presetReady: true, captureVerified: true)
+        XCTAssertEqual(h.state.status, .processing)
+
+        h.controller.tapConflictsChanged(.init(appNames: ["FineTune"]))
+
+        XCTAssertEqual(h.pipelines.purposes, [.processing])
+        XCTAssertEqual(h.pipelines.liveCount, 0)
+        XCTAssertEqual(h.state.healthIssues, [.incompatibleAudioApp(appNames: ["FineTune"])])
+        guard case .nativePassthrough = h.state.status else {
+            return XCTFail("expected passthrough while a conflicting app runs")
+        }
+    }
+
+    func testQuittingConflictingAppResumesProcessing() {
+        let h = Harness(effect: true)
+        h.pipelines.automaticEvent = nil
+        h.controller.launch(presetReady: true, captureVerified: true)
+        h.controller.tapConflictsChanged(.init(appNames: ["FineTune"]))
+
+        h.controller.tapConflictsChanged(.init(appNames: []))
+
+        XCTAssertEqual(h.pipelines.purposes, [.processing, .processing])
+        XCTAssertTrue(h.state.healthIssues.isEmpty)
+        XCTAssertEqual(h.state.status, .processing)
+    }
+
+    func testConflictBeforeLaunchNeverCreatesProcessingPipeline() {
+        let h = Harness(effect: true)
+        h.pipelines.automaticEvent = nil
+        h.controller.tapConflictsChanged(.init(appNames: ["FineTune"]))
+
+        h.controller.launch(presetReady: true, captureVerified: true)
+
+        XCTAssertEqual(h.pipelines.purposes, [])
+        XCTAssertEqual(h.state.healthIssues, [.incompatibleAudioApp(appNames: ["FineTune"])])
+        guard case .nativePassthrough = h.state.status else {
+            return XCTFail("expected passthrough when a conflicting app is already running")
+        }
+    }
+
+    func testUnchangedConflictSnapshotDoesNotInvalidate() {
+        let h = Harness(effect: true)
+        h.pipelines.automaticEvent = nil
+        h.controller.launch(presetReady: true, captureVerified: true)
+
+        h.controller.tapConflictsChanged(.init(appNames: []))
+
+        XCTAssertEqual(h.pipelines.purposes, [.processing])
+        XCTAssertEqual(h.state.status, .processing)
+    }
+
+    func testCaptureTestStillRunsDuringConflictThenReturnsToPassthrough() {
+        let h = Harness(effect: true)
+        h.pipelines.automaticEvent = nil
+        h.controller.launch(presetReady: true, captureVerified: true)
+        h.controller.tapConflictsChanged(.init(appNames: ["FineTune"]))
+
+        h.controller.requestSystemAudioAccess()
+
+        XCTAssertEqual(h.pipelines.purposes, [.processing, .verification(includeOwnProcess: true)])
+        XCTAssertEqual(h.pipelines.muteBehaviors, [.mutedWhenTapped, .unmuted])
+
+        h.pipelines.emit(.signalDetected)
+
+        XCTAssertEqual(h.pipelines.purposes, [.processing, .verification(includeOwnProcess: true)])
+        XCTAssertEqual(h.pipelines.liveCount, 0)
+        XCTAssertEqual(h.state.captureAccess, .verified)
+        guard case .nativePassthrough = h.state.status else {
+            return XCTFail("expected passthrough after the capture test while a conflicting app runs")
+        }
+    }
+
     func testTestAgainRepreparesSelectedEffectAfterInvalidation() {
         let h = Harness(effect: true)
         h.pipelines.automaticEvent = nil
