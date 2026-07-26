@@ -187,6 +187,39 @@ final class AudioRuntimeController {
         )
     }
 
+    /// True when a spatial preset can be swapped without rebuilding the pipeline.
+    var canUpdateSpatialLive: Bool {
+        launched && !sleeping && !terminated
+            && pipeline != nil && captureVerified
+            && state.status.isProcessing && tapConflict.isEmpty
+    }
+
+    /// Applies a spatial readiness change without stopping the tap. The renderer
+    /// state was already published to the render thread, which crossfades to it.
+    /// Falls back to the full restart path when the pipeline is not live.
+    @discardableResult
+    func updateSpatialLive(isReady: Bool) -> Bool {
+        let readiness = AudioRuntimeEffectReadiness(
+            spatialReady: isReady,
+            equalizerDefinition: effectReadiness.equalizerDefinition
+        )
+        guard canUpdateSpatialLive, readiness.hasSelectedEffect else {
+            updateReadiness(readiness, invalidation: .spatial)
+            return false
+        }
+        effectReadiness = readiness
+        state.setHealthIssue(nil, for: .spatial)
+        state.setHealthIssue(nil, for: .pipeline)
+        state.publish(
+            .processing,
+            output: state.currentOutput,
+            warning: state.warningMessage,
+            captureAccess: .verified
+        )
+        scheduleStabilityReset(for: generation)
+        return true
+    }
+
     func reprepareCurrentOutput() {
         guard launched, !sleeping, !terminated, stopForInvalidation() else { return }
         hasPreparedDesiredOutput = false

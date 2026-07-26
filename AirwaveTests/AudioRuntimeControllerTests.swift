@@ -622,6 +622,44 @@ final class AudioRuntimeControllerTests: XCTestCase {
         XCTAssertEqual(h.state.status, .recovering(reason: "\(reason) Retrying in 1s."))
     }
 
+    func testLiveSpatialUpdateKeepsTheProcessingPipeline() {
+        let h = Harness(effect: true)
+        h.pipelines.automaticEvent = nil
+        h.controller.launch(presetReady: true, captureVerified: true)
+        XCTAssertEqual(h.state.status, .processing)
+        XCTAssertTrue(h.controller.canUpdateSpatialLive)
+
+        XCTAssertTrue(h.controller.updateSpatialLive(isReady: true))
+
+        XCTAssertEqual(h.pipelines.purposes, [.processing])
+        XCTAssertEqual(h.pipelines.liveCount, 1)
+        XCTAssertEqual(h.state.status, .processing)
+        XCTAssertEqual(h.state.captureAccess, .verified)
+    }
+
+    func testLiveSpatialUpdateStopsPipelineWhenNoEffectRemains() {
+        let h = Harness(effect: true)
+        h.pipelines.automaticEvent = nil
+        h.controller.launch(presetReady: true, captureVerified: true)
+        XCTAssertEqual(h.state.status, .processing)
+
+        XCTAssertFalse(h.controller.updateSpatialLive(isReady: false))
+
+        XCTAssertEqual(h.pipelines.liveCount, 0)
+        XCTAssertEqual(h.state.status, .inactive)
+    }
+
+    func testLiveSpatialUpdateIsRefusedWhileAConflictingAppRuns() {
+        let h = Harness(effect: true)
+        h.pipelines.automaticEvent = nil
+        h.controller.launch(presetReady: true, captureVerified: true)
+        h.controller.tapConflictsChanged(.init(appNames: ["FineTune"]))
+
+        XCTAssertFalse(h.controller.canUpdateSpatialLive)
+        XCTAssertFalse(h.controller.updateSpatialLive(isReady: true))
+        XCTAssertEqual(h.pipelines.liveCount, 0)
+    }
+
     func testOutputChangeSleepAndTerminationReleaseResources() {
         let h = Harness(effect: true)
         h.controller.launch(presetReady: true)
