@@ -349,23 +349,23 @@ final class ProductSurfaceTests: XCTestCase {
         let style = try String(contentsOf: root.appendingPathComponent("Airwave/AirwaveStyle.swift"), encoding: .utf8)
         let settings = try String(contentsOf: root.appendingPathComponent("Airwave/SettingsView.swift"), encoding: .utf8)
         let equalizer = try String(contentsOf: root.appendingPathComponent("Airwave/EqualizerSettingsView.swift"), encoding: .utf8)
+        // Both pickers share one library component; its chrome lives there.
+        let library = try String(contentsOf: root.appendingPathComponent("Airwave/PresetLibraryView.swift"), encoding: .utf8)
 
-        XCTAssertTrue(style.contains("Get more HRIRs…"))
-        XCTAssertTrue(equalizer.contains("Get more equalizer presets…"))
+        XCTAssertTrue(library.contains("Get more HRIRs…"))
+        XCTAssertTrue(library.contains("Get more equalizer presets…"))
         XCTAssertTrue(style.contains("https://airtable.com/embed/appac4r1cu9UpBNAN/shrpUAbtyZxhDDMjg/tblopH2GznvFipWjq/viwnouWPGDuYEd8Go"))
         XCTAssertTrue(style.contains("https://autoeq.app/"))
-        XCTAssertTrue(style.contains("Button(\"Manage…\")"))
-        XCTAssertTrue(equalizer.contains("Button(\"Manage…\")"))
+        XCTAssertTrue(library.contains("Button(\"Manage…\")"))
+        XCTAssertFalse(library.contains("Button(\"Show in Finder\")"))
         XCTAssertFalse(style.contains("Button(\"Show in Finder\")"))
         XCTAssertFalse(equalizer.contains("Button(\"Show in Finder\")"))
-        XCTAssertTrue(style.contains(".buttonStyle(.plain)"))
-        XCTAssertTrue(style.contains(".foregroundStyle(.tint)"))
+        XCTAssertTrue(library.contains(".buttonStyle(.plain)"))
+        XCTAssertTrue(library.contains(".foregroundStyle(.tint)"))
         XCTAssertTrue(equalizer.contains(".buttonStyle(.plain)"))
-        XCTAssertTrue(equalizer.contains(".foregroundStyle(.tint)"))
 
-        let libraryCard = try XCTUnwrap(equalizer.range(of: "private var libraryCard"))
-        let libraryCardSource = String(equalizer[libraryCard.lowerBound...])
-        XCTAssertFalse(libraryCardSource.contains("title: \"Equalizer Presets\""))
+        let rowsSource = try XCTUnwrap(equalizer.range(of: "private var rows"))
+        XCTAssertFalse(String(equalizer[rowsSource.lowerBound...]).contains("title: \"Equalizer Presets\""))
 
         for icon in ["slider.horizontal.3", "headphones", "sparkles", "gearshape"] {
             XCTAssertTrue(settings.contains("systemImage: \"\(icon)\""))
@@ -438,12 +438,16 @@ final class ProductSurfaceTests: XCTestCase {
         XCTAssertFalse(device.contains("DeviceManagementResult"))
         XCTAssertFalse(device.contains("coordinator.result"))
         XCTAssertFalse(device.contains("checkmark.circle.fill"))
+        let library = try String(
+            contentsOf: root.appendingPathComponent("Airwave/PresetLibraryView.swift"),
+            encoding: .utf8
+        )
+
         XCTAssertFalse(hrir.contains("isSuccess"))
         XCTAssertFalse(equalizer.contains("isSuccess"))
-        XCTAssertTrue(hrir.contains("exclamationmark.triangle.fill"))
-        XCTAssertTrue(equalizer.contains("exclamationmark.triangle.fill"))
-        XCTAssertTrue(hrir.contains("confirmationDialog("))
-        XCTAssertTrue(equalizer.contains("confirmationDialog("))
+        XCTAssertFalse(library.contains("isSuccess"))
+        XCTAssertTrue(library.contains("exclamationmark.triangle.fill"))
+        XCTAssertTrue(library.contains("confirmationDialog("))
     }
 
     func testOnboardingHasOneCaptureCardAndNoSplitHealthCopy() throws {

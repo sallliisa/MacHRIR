@@ -250,7 +250,7 @@ final class EqualizerLibraryTests: XCTestCase {
     func testSettingsCoordinatorSuppressesSuccessfulActionsAndSkippedImports() throws {
         let context = try TestContext()
         let source = try context.writePreset(named: "Curve.txt", preamp: 1)
-        let coordinator = EqualizerSettingsCoordinator(manager: context.manager)
+        let coordinator = PresetLibraryCoordinator(manager: context.manager, configuration: .equalizer)
 
         coordinator.receive([source])
         let imported = try XCTUnwrap(context.manager.presets.first)
@@ -261,7 +261,7 @@ final class EqualizerLibraryTests: XCTestCase {
         coordinator.resolveConflicts(.keepExisting)
         XCTAssertNil(coordinator.message)
 
-        XCTAssertTrue(coordinator.delete(imported, decision: .confirm))
+        XCTAssertTrue(coordinator.delete(context.manager.libraryDeletion(for: imported), decision: .confirm))
         XCTAssertNil(coordinator.message)
     }
 
@@ -269,7 +269,7 @@ final class EqualizerLibraryTests: XCTestCase {
         let context = try TestContext()
         let valid = try context.writePreset(named: "Valid.txt", preamp: 1)
         let invalid = try context.writePreset(named: "Invalid.txt", preamp: nil)
-        let coordinator = EqualizerSettingsCoordinator(manager: context.manager)
+        let coordinator = PresetLibraryCoordinator(manager: context.manager, configuration: .equalizer)
 
         coordinator.receive([invalid, valid])
 
