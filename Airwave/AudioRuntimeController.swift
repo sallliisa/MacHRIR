@@ -98,6 +98,7 @@ final class AudioRuntimeController {
     private weak var profilePreparer: (any OutputEffectProfilePreparing)?
     private var desiredOutput: OutputDeviceDescriptor?
     private var hasPreparedDesiredOutput = false
+    private var tapConflict: TapConflictMonitor.Snapshot = .none
 
     init(
         state: AudioRuntimeState,
@@ -144,6 +145,20 @@ final class AudioRuntimeController {
             return
         }
         if effectReadiness.hasSelectedEffect && !self.captureVerified { captureProbeRequested = true }
+        reconcile()
+    }
+
+    /// Apps that install always-on muted process taps deadlock against Airwave's
+    /// own tap. Processing suspends while one runs and resumes when it quits.
+    func tapConflictsChanged(_ snapshot: TapConflictMonitor.Snapshot) {
+        guard snapshot != tapConflict else { return }
+        tapConflict = snapshot
+        state.setHealthIssue(
+            snapshot.isEmpty ? nil : .incompatibleAudioApp(appNames: snapshot.appNames),
+            for: .coexistence
+        )
+        guard launched, !sleeping, !terminated else { return }
+        guard stopForInvalidation() else { return }
         reconcile()
     }
 
@@ -365,6 +380,14 @@ final class AudioRuntimeController {
         let purpose: AudioPipelinePurpose = captureProbeRequested && !captureVerified
             ? .verification(includeOwnProcess: explicitCaptureTest)
             : .processing
+        if purpose == .processing, !tapConflict.isEmpty {
+            let names = tapConflict.appNames.joined(separator: ", ")
+            state.publish(
+                .nativePassthrough(reason: "\(names) is managing per-app audio. Airwave paused processing to keep sound working."),
+                output: output
+            )
+            return
+        }
         let preparation: AudioEffectPreparationResult?
         if let effectGraph {
             let result = effectGraph.prepare(for: output, equalizerDefinition: effectReadiness.equalizerDefinition)

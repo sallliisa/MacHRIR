@@ -555,6 +555,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         Logger.log("[AppDelegate] Airwave safe shell launched")
         ApplicationLifecycleCoordinator.shared.updateActivationPolicy()
+        // Seed the conflict state before the first reconcile so an already
+        // running tap-based volume app never gets a processing tap, even briefly.
+        let tapConflicts = TapConflictMonitor.shared
+        tapConflicts.onChange = { AudioRuntimeController.shared.tapConflictsChanged($0) }
+        AudioRuntimeController.shared.tapConflictsChanged(tapConflicts.currentSnapshot())
+        tapConflicts.start()
         DeviceProfileRuntimeCoordinator.shared.launch()
         OutputDeviceDiscoveryCoordinator.shared.launch()
         runtimeIsReady = true
