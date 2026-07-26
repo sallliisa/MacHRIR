@@ -4,17 +4,39 @@ import XCTest
 final class ConvolutionEngineTests: XCTestCase {
     private let blockSize = 8
 
-    private func makeEngine() -> ConvolutionEngine {
+    private func makeEngine() -> StereoConvolutionEngine {
         let impulse = [Float](arrayLiteral: 1, 0, 0, 0, 0, 0, 0, 0)
-        return try! XCTUnwrap(ConvolutionEngine(hrirSamples: impulse, blockSize: blockSize))
+        return try! XCTUnwrap(StereoConvolutionEngine(
+            leftEarHRIR: impulse,
+            rightEarHRIR: impulse,
+            blockSize: blockSize
+        ))
+    }
+
+    /// Drives both ears and returns the left-ear output.
+    private func process(_ engine: StereoConvolutionEngine, input: [Float]) -> [Float] {
+        var left = [Float](repeating: 0, count: blockSize)
+        var right = [Float](repeating: 0, count: blockSize)
+        input.withUnsafeBufferPointer { inputPtr in
+            left.withUnsafeMutableBufferPointer { leftPtr in
+                right.withUnsafeMutableBufferPointer { rightPtr in
+                    engine.process(
+                        input: inputPtr.baseAddress!,
+                        outputLeft: leftPtr.baseAddress!,
+                        outputRight: rightPtr.baseAddress!
+                    )
+                }
+            }
+        }
+        XCTAssertEqual(left, right, "both ears share one impulse response")
+        return left
     }
 
     func testImpulsePreservesSampleOrder() {
         let engine = makeEngine()
         let input: [Float] = [0.25, -0.5, 1, 0.75, -1, 0.125, 0.5, -0.25]
-        var output = [Float](repeating: 0, count: blockSize)
 
-        engine.process(input: input, output: &output)
+        let output = process(engine, input: input)
 
         XCTAssertTrue(zip(output, input).allSatisfy { abs($0.0 - $0.1) < 0.0001 })
     }
@@ -23,12 +45,11 @@ final class ConvolutionEngineTests: XCTestCase {
         let engine = makeEngine()
         var input = [Float](repeating: 0, count: blockSize)
         input[blockSize - 1] = 1
-        var output = [Float](repeating: 0, count: blockSize)
-        engine.process(input: input, output: &output)
+        _ = process(engine, input: input)
 
         engine.reset()
         input = [Float](repeating: 0, count: blockSize)
-        engine.process(input: input, output: &output)
+        let output = process(engine, input: input)
 
         XCTAssertTrue(output.allSatisfy { abs($0) < 0.0001 })
     }
@@ -36,10 +57,9 @@ final class ConvolutionEngineTests: XCTestCase {
     func testMultipleBlocksRemainFinite() {
         let engine = makeEngine()
         var input = (0..<blockSize).map { Float($0) / 7 }
-        var output = [Float](repeating: 0, count: blockSize)
 
         for _ in 0..<64 {
-            engine.process(input: input, output: &output)
+            let output = process(engine, input: input)
             XCTAssertTrue(output.allSatisfy { $0.isFinite })
             input = input.map { -$0 * 0.97 + 0.01 }
         }
@@ -47,13 +67,11 @@ final class ConvolutionEngineTests: XCTestCase {
 
     func testIdenticalInputAfterResetProducesIdenticalOutput() {
         let engine = makeEngine()
-        let input = [Float](stride(from: -0.75, through: 0.75, by: 0.2)).prefix(blockSize)
-        var first = [Float](repeating: 0, count: blockSize)
-        var second = [Float](repeating: 0, count: blockSize)
+        let input = Array([Float](stride(from: -0.75, through: 0.75, by: 0.2)).prefix(blockSize))
 
-        engine.process(input: Array(input), output: &first)
+        let first = process(engine, input: input)
         engine.reset()
-        engine.process(input: Array(input), output: &second)
+        let second = process(engine, input: input)
 
         XCTAssertTrue(zip(first, second).allSatisfy { abs($0.0 - $0.1) < 0.0001 })
     }
@@ -89,21 +107,21 @@ final class ConvolutionCharacterizationTests: XCTestCase {
         rightIR: [Float],
         blockSize: Int
     ) -> ([Float], [Float]) {
-        let leftEngine = ConvolutionEngine(hrirSamples: leftIR, blockSize: blockSize)!
-        let rightEngine = ConvolutionEngine(hrirSamples: rightIR, blockSize: blockSize)!
+        let engine = StereoConvolutionEngine(
+            leftEarHRIR: leftIR,
+            rightEarHRIR: rightIR,
+            blockSize: blockSize
+        )!
         var left = [Float](repeating: 0, count: input.count)
         var right = [Float](repeating: 0, count: input.count)
         input.withUnsafeBufferPointer { inputPtr in
             left.withUnsafeMutableBufferPointer { leftPtr in
                 right.withUnsafeMutableBufferPointer { rightPtr in
                     for block in stride(from: 0, to: input.count, by: blockSize) {
-                        leftEngine.process(
+                        engine.process(
                             input: inputPtr.baseAddress!.advanced(by: block),
-                            output: leftPtr.baseAddress!.advanced(by: block)
-                        )
-                        rightEngine.process(
-                            input: inputPtr.baseAddress!.advanced(by: block),
-                            output: rightPtr.baseAddress!.advanced(by: block)
+                            outputLeft: leftPtr.baseAddress!.advanced(by: block),
+                            outputRight: rightPtr.baseAddress!.advanced(by: block)
                         )
                     }
                 }
