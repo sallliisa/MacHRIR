@@ -347,7 +347,9 @@ final class ProductSurfaceTests: XCTestCase {
     func testSettingsSurfaceIncludesResourceLinksPickerLabelsIconsAndHitTargets() throws {
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
         let style = try String(contentsOf: root.appendingPathComponent("Airwave/AirwaveTheme.swift"), encoding: .utf8)
+        // The settings surface spans the window shell and the page views.
         let settings = try String(contentsOf: root.appendingPathComponent("Airwave/SettingsView.swift"), encoding: .utf8)
+            + String(contentsOf: root.appendingPathComponent("Airwave/SettingsWindowContent.swift"), encoding: .utf8)
         let equalizer = try String(contentsOf: root.appendingPathComponent("Airwave/EqualizerSettingsView.swift"), encoding: .utf8)
         // Both pickers share one library component; its chrome lives there.
         let library = try String(contentsOf: root.appendingPathComponent("Airwave/PresetLibraryView.swift"), encoding: .utf8)
@@ -483,6 +485,7 @@ final class ProductSurfaceTests: XCTestCase {
     func testCaptureControlsGuidanceAndStatusCardOrder() throws {
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
         let source = try String(contentsOf: root.appendingPathComponent("Airwave/OnboardingView.swift"), encoding: .utf8)
+            + String(contentsOf: root.appendingPathComponent("Airwave/OnboardingProgressIndicator.swift"), encoding: .utf8)
 
         let controls = try XCTUnwrap(source.range(of: "captureTestControls"))
         let guidance = try XCTUnwrap(source.range(of: "captureFailureGuidance(guidance)"))
