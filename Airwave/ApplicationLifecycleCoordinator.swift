@@ -126,7 +126,9 @@ final class ApplicationLifecycleCoordinator: NSObject {
         return window.canBecomeMain && window.styleMask.contains(.titled) && !window.title.isEmpty
     }
 
-    private static func isMenuBarPopover(_ window: NSWindow) -> Bool {
+    /// SwiftUI gives the menu bar extra's popover no identifier, so the class
+    /// name is the only handle. One definition, used by every caller.
+    static func isMenuBarPopover(_ window: NSWindow) -> Bool {
         guard window.isVisible else { return false }
         let className = window.className.lowercased()
         return className.contains("menubar") || className.contains("popover")

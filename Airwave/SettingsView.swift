@@ -350,10 +350,10 @@ struct SettingsView: View {
             AirwaveHRIRPicker(
                 manager: hrirManager,
                 selectedID: profiles.editingProfile?.hrirPresetID,
-                onSelect: { profiles.setHRIRPresetID($0?.id) },
+                onSelect: { viewModel.selectEditingHRIRPreset($0) },
                 onDelete: { preset in
                     if profiles.editingProfile?.hrirPresetID == preset.id {
-                        profiles.setHRIRPresetID(nil)
+                        viewModel.selectEditingHRIRPreset(nil)
                     }
                 }
             )

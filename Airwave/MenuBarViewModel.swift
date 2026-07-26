@@ -1,6 +1,9 @@
 import AppKit
 import Combine
 
+/// Actions facade for the menu bar and the settings pages: it owns no state of
+/// its own (hence no `@Published`), it is the one path through which the UI
+/// mutates preset selection and drives runtime actions.
 @MainActor
 final class MenuBarViewModel: ObservableObject {
     static let shared = MenuBarViewModel()
@@ -36,8 +39,19 @@ final class MenuBarViewModel: ObservableObject {
         )
     }
 
+    /// Selection for the device Airwave is currently playing through.
     func selectPreset(_ preset: HRIRPreset?) {
         profileManager.setCurrentHRIRPresetID(preset?.id)
+    }
+
+    /// Selection for the device being edited in Settings, which is not
+    /// necessarily the current output.
+    func selectEditingHRIRPreset(_ preset: HRIRPreset?) {
+        profileManager.setHRIRPresetID(preset?.id)
+    }
+
+    func selectEditingEqualizerPreset(_ presetID: UUID?) {
+        profileManager.setEqualizerPresetID(presetID)
     }
 
     var currentHRIRPreset: HRIRPreset? {
@@ -46,10 +60,6 @@ final class MenuBarViewModel: ObservableObject {
 
     static func sortedPresets(_ presets: [HRIRPreset]) -> [HRIRPreset] {
         presets.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
-    }
-
-    static func presetTargetSampleRate(for output: OutputDeviceDescriptor?) -> Double {
-        output?.nominalSampleRate ?? 48_000
     }
 
     func openPresetsDirectory() {
@@ -84,11 +94,7 @@ final class MenuBarViewModel: ObservableObject {
     }
 
     func closeMenuBarPopover() {
-        if let window = NSApp.windows.first(where: {
-            $0.className.contains("MenuBar") || $0.className.contains("Popover")
-        }) {
-            window.close()
-        }
+        NSApp.windows.first(where: ApplicationLifecycleCoordinator.isMenuBarPopover)?.close()
     }
 
     func quitApp() {
