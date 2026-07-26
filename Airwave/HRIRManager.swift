@@ -102,6 +102,15 @@ nonisolated struct SpatialRetirementSlots {
 
     var isEmpty: Bool { first == nil && second == nil && third == nil && fourth == nil }
 
+    var count: Int {
+        var total = 0
+        if first != nil { total += 1 }
+        if second != nil { total += 1 }
+        if third != nil { total += 1 }
+        if fourth != nil { total += 1 }
+        return total
+    }
+
     mutating func insert(_ state: HRIRManager.RendererState) -> Bool {
         if first == nil { first = state; return true }
         if second == nil { second = state; return true }
@@ -211,6 +220,12 @@ nonisolated final class SpatialRendererCrossfader {
     }
 
     var hasObservedRenderers: Bool { observedState?.renderers.isEmpty == false }
+
+    #if DEBUG
+    var retiredStateCountForTesting: Int { retirementLock.withLock { $0.count } }
+    var isFadingForTesting: Bool { isFading }
+    var activeStateForTesting: RendererState? { activeState }
+    #endif
 
     /// Releases states retired by the render thread. Call from the control thread.
     func drainRetiredStates() {
