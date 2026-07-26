@@ -21,6 +21,8 @@ final class DeviceProfileRuntimeCoordinator: OutputEffectProfilePreparing {
     private var launched = false
     private var isSanitizing = false
     private var pendingPreparation: (output: OutputDeviceDescriptor, completion: (AudioRuntimeEffectReadiness) -> Void)?
+    /// Output the live pipeline was prepared for; live HRIR swaps reuse its sample rate.
+    private var preparedOutput: OutputDeviceDescriptor?
 
     init(
         profiles: DeviceProfileManager,
@@ -65,8 +67,12 @@ final class DeviceProfileRuntimeCoordinator: OutputEffectProfilePreparing {
     ) {
         generation += 1
         let requestedGeneration = generation
-        hrir.deactivatePreset()
+        // Full preparation always follows a pipeline teardown; drop render state
+        // instead of fading, so a rebuilt pipeline never resumes a stale preset.
+        hrir.deactivatePreset(immediate: true)
+        preparedOutput = output
         guard output.isSupportedProfileOutput else {
+            preparedOutput = nil
             profiles.observeCurrentOutput(nil)
             completion(.init(spatialReady: false, equalizerDefinition: nil))
             return
@@ -123,7 +129,8 @@ final class DeviceProfileRuntimeCoordinator: OutputEffectProfilePreparing {
     func cancelPreparation() {
         generation += 1
         pendingPreparation = nil
-        hrir.deactivatePreset()
+        preparedOutput = nil
+        hrir.deactivatePreset(immediate: true)
     }
 
     func outputBecameUnsupportedOrUnavailable() {
@@ -140,7 +147,49 @@ final class DeviceProfileRuntimeCoordinator: OutputEffectProfilePreparing {
             let definition = equalizer.preset(id: profiles.currentProfile?.equalizerPresetID)?.definition
             controller.updateCurrentEqualizer(definition)
         case .hrir, .both:
+            spatialProfileChanged(includesEqualizer: change.effect == .both)
+        }
+    }
+
+    /// Swaps the HRIR preset on the live pipeline; the render thread crossfades
+    /// between renderer states. Restarts only when no live pipeline can take it.
+    private func spatialProfileChanged(includesEqualizer: Bool) {
+        let definition = equalizer.preset(id: profiles.currentProfile?.equalizerPresetID)?.definition
+        guard controller.canUpdateSpatialLive, let output = preparedOutput else {
             controller.reprepareCurrentOutput()
+            return
+        }
+        guard let hrirID = profiles.currentProfile?.hrirPresetID,
+              let preset = hrir.presets.first(where: { $0.id == hrirID }) else {
+            guard definition != nil else {
+                // Nothing left to run; the pipeline must stop so the tap unmutes.
+                controller.reprepareCurrentOutput()
+                return
+            }
+            generation += 1
+            hrir.deactivatePreset()
+            if includesEqualizer { controller.updateCurrentEqualizer(definition) }
+            controller.updateSpatialLive(isReady: false)
+            return
+        }
+
+        generation += 1
+        let requestedGeneration = generation
+        hrir.activatePreset(
+            preset,
+            targetSampleRate: output.nominalSampleRate,
+            inputLayout: .stereo
+        ) { [weak self] result in
+            guard let self, requestedGeneration == self.generation else { return }
+            switch result {
+            case .success:
+                if includesEqualizer { self.controller.updateCurrentEqualizer(definition) }
+                self.controller.updateSpatialLive(isReady: true)
+            case .failure:
+                // Full restart is the established recovery path and keeps the
+                // presetActivationFailed error surface.
+                self.controller.reprepareCurrentOutput()
+            }
         }
     }
 

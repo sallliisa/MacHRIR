@@ -165,3 +165,177 @@ final class RealtimeAudioProcessorTests: XCTestCase {
         XCTAssertTrue(finalRightOutput.allSatisfy { $0.isFinite })
     }
 }
+
+final class SpatialRendererCrossfaderTests: XCTestCase {
+    private let blockSize = 512
+    private let fadeLength = 1_024
+
+    private func makeState(gain: Float) -> HRIRManager.RendererState {
+        let left = ConvolutionEngine(hrirSamples: [gain], blockSize: blockSize)!
+        let right = ConvolutionEngine(hrirSamples: [gain], blockSize: blockSize)!
+        return HRIRManager.RendererState(
+            renderers: [VirtualSpeakerRenderer(speaker: .FL, convolverLeftEar: left, convolverRightEar: right)],
+            blockSize: blockSize
+        )
+    }
+
+    private func makeCrossfader() -> SpatialRendererCrossfader {
+        SpatialRendererCrossfader(primeLength: blockSize, fadeLength: fadeLength, maxFramesPerCallback: 4_096)
+    }
+
+    /// Drives a continuous 480 Hz sine through the crossfader in fixed callbacks
+    /// and records the input and output streams for comparison.
+    private final class Driver {
+        let crossfader: SpatialRendererCrossfader
+        private(set) var input: [Float] = []
+        private(set) var outputLeft: [Float] = []
+        private(set) var outputRight: [Float] = []
+        private var frame = 0
+
+        init(_ crossfader: SpatialRendererCrossfader) { self.crossfader = crossfader }
+
+        func run(callbacks: Int, size: Int = 512) {
+            for _ in 0..<callbacks {
+                var chunk = [Float](repeating: 0, count: size)
+                for index in 0..<size {
+                    chunk[index] = Float(sin(2 * Double.pi * 480 * Double(frame + index) / 48_000))
+                }
+                frame += size
+                var left = [Float](repeating: .nan, count: size)
+                var right = [Float](repeating: .nan, count: size)
+                chunk.withUnsafeBufferPointer { inputPtr in
+                    left.withUnsafeMutableBufferPointer { leftPtr in
+                        right.withUnsafeMutableBufferPointer { rightPtr in
+                            crossfader.process(
+                                inputLeft: inputPtr.baseAddress!,
+                                inputRight: inputPtr.baseAddress!,
+                                leftOutput: leftPtr.baseAddress!,
+                                rightOutput: rightPtr.baseAddress!,
+                                frameCount: size
+                            )
+                        }
+                    }
+                }
+                input.append(contentsOf: chunk)
+                outputLeft.append(contentsOf: left)
+                outputRight.append(contentsOf: right)
+            }
+        }
+    }
+
+    private func maximumStepDelta(_ samples: [Float]) -> Float {
+        var maximum: Float = 0
+        for index in 1..<samples.count {
+            maximum = max(maximum, abs(samples[index] - samples[index - 1]))
+        }
+        return maximum
+    }
+
+    func testSwapProducesNoOutputDiscontinuity() {
+        let crossfader = makeCrossfader()
+        let driver = Driver(crossfader)
+        let stateA = makeState(gain: 1)
+        let stateB = makeState(gain: 0.5)
+
+        crossfader.observe(stateA)
+        driver.run(callbacks: 6)
+        crossfader.observe(stateB)
+        driver.run(callbacks: 8)
+
+        // A hard swap steps by ~0.5 (half the sine amplitude); the sine itself
+        // steps by at most 0.063 per sample at 480 Hz / 48 kHz.
+        XCTAssertLessThan(maximumStepDelta(driver.outputLeft), 0.1)
+        XCTAssertLessThan(maximumStepDelta(driver.outputRight), 0.1)
+        XCTAssertTrue(driver.outputLeft.allSatisfy { $0.isFinite })
+    }
+
+    func testFadeCompletesOnIncomingState() {
+        let crossfader = makeCrossfader()
+        let driver = Driver(crossfader)
+        crossfader.observe(makeState(gain: 1))
+        driver.run(callbacks: 6)
+        crossfader.observe(makeState(gain: 0.5))
+        driver.run(callbacks: 8)
+
+        XCTAssertFalse(crossfader.isFadingForTesting)
+        let tail = driver.outputLeft.suffix(512)
+        let expected = driver.input.suffix(512).map { $0 * 0.5 }
+        for (actual, want) in zip(tail, expected) {
+            XCTAssertEqual(actual, want, accuracy: 1e-5)
+        }
+    }
+
+    func testRetiredStateIsHandedToControlThreadAndDrained() {
+        let crossfader = makeCrossfader()
+        let driver = Driver(crossfader)
+        crossfader.observe(makeState(gain: 1))
+        driver.run(callbacks: 6)
+        XCTAssertEqual(crossfader.retiredStateCountForTesting, 0) // faded in from passthrough
+
+        crossfader.observe(makeState(gain: 0.5))
+        driver.run(callbacks: 8)
+
+        XCTAssertEqual(crossfader.retiredStateCountForTesting, 1)
+        crossfader.drainRetiredStates()
+        XCTAssertEqual(crossfader.retiredStateCountForTesting, 0)
+    }
+
+    func testRapidDoubleSwitchSettlesOnNewestState() {
+        let crossfader = makeCrossfader()
+        let driver = Driver(crossfader)
+        crossfader.observe(makeState(gain: 1))
+        driver.run(callbacks: 6)
+
+        crossfader.observe(makeState(gain: 0.5))
+        driver.run(callbacks: 1) // still priming
+        crossfader.observe(makeState(gain: 0.25))
+        driver.run(callbacks: 12)
+
+        XCTAssertFalse(crossfader.isFadingForTesting)
+        XCTAssertLessThan(maximumStepDelta(driver.outputLeft), 0.1)
+        let tail = driver.outputLeft.suffix(512)
+        let expected = driver.input.suffix(512).map { $0 * 0.25 }
+        for (actual, want) in zip(tail, expected) {
+            XCTAssertEqual(actual, want, accuracy: 1e-5)
+        }
+    }
+
+    func testRemovingPresetFadesToPassthrough() {
+        let crossfader = makeCrossfader()
+        let driver = Driver(crossfader)
+        crossfader.observe(makeState(gain: 0.5))
+        driver.run(callbacks: 6)
+
+        crossfader.observe(nil)
+        XCTAssertTrue(crossfader.isRenderingSpatialAudio)
+        driver.run(callbacks: 4)
+
+        XCTAssertFalse(crossfader.isRenderingSpatialAudio)
+        XCTAssertLessThan(maximumStepDelta(driver.outputLeft), 0.1)
+        let tail = Array(driver.outputLeft.suffix(512))
+        let expected = Array(driver.input.suffix(512))
+        for (actual, want) in zip(tail, expected) {
+            XCTAssertEqual(actual, want, accuracy: 1e-5)
+        }
+    }
+
+    func testResetDropsStateWithoutFadingAndRetiresIt() {
+        let crossfader = makeCrossfader()
+        let driver = Driver(crossfader)
+        let state = makeState(gain: 0.5)
+        crossfader.observe(state)
+        driver.run(callbacks: 6)
+
+        crossfader.requestReset()
+        driver.run(callbacks: 1)
+
+        XCTAssertFalse(crossfader.isFadingForTesting)
+        XCTAssertNil(crossfader.activeStateForTesting)
+        XCTAssertEqual(crossfader.retiredStateCountForTesting, 1)
+        let tail = Array(driver.outputLeft.suffix(512))
+        let expected = Array(driver.input.suffix(512))
+        for (actual, want) in zip(tail, expected) {
+            XCTAssertEqual(actual, want, accuracy: 1e-5)
+        }
+    }
+}
