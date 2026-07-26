@@ -10,7 +10,7 @@ import Accelerate
 
 /// Thread-safe manager for shared FFTSetup instances
 /// Reduces memory usage by sharing FFT setup structures across multiple ConvolutionEngines
-class FFTSetupManager {
+nonisolated final class FFTSetupManager {
     
     // MARK: - Singleton
     

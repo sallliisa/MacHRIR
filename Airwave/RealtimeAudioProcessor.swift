@@ -120,8 +120,7 @@ nonisolated final class RealtimeAudioProcessor {
 
     func reset() {
         for renderer in renderers {
-            renderer.convolverLeftEar.reset()
-            renderer.convolverRightEar.reset()
+            renderer.convolver.reset()
         }
         resetStorage()
     }
@@ -146,8 +145,11 @@ nonisolated final class RealtimeAudioProcessor {
         for rendererIndex in 0..<rendererCount {
             let input = rendererIndex == 0 ? pendingLeft : pendingRight
             let renderer = renderers[rendererIndex]
-            renderer.convolverLeftEar.process(input: input, output: leftTempBuffers[rendererIndex])
-            renderer.convolverRightEar.process(input: input, output: rightTempBuffers[rendererIndex])
+            renderer.convolver.process(
+                input: input,
+                outputLeft: leftTempBuffers[rendererIndex],
+                outputRight: rightTempBuffers[rendererIndex]
+            )
 
             vDSP_vadd(
                 blockLeft, 1,
@@ -163,12 +165,17 @@ nonisolated final class RealtimeAudioProcessor {
             )
         }
 
-        for index in 0..<blockSize {
-            let writeIndex = (fifoReadIndex + fifoCount) % fifoCapacity
-            fifoLeft[writeIndex] = blockLeft[index]
-            fifoRight[writeIndex] = blockRight[index]
-            fifoCount += 1
+        // At most two segments: up to the end of the ring, then the wrap.
+        let writeIndex = (fifoReadIndex + fifoCount) % fifoCapacity
+        let firstCount = min(blockSize, fifoCapacity - writeIndex)
+        memcpy(fifoLeft.advanced(by: writeIndex), blockLeft, firstCount * MemoryLayout<Float>.size)
+        memcpy(fifoRight.advanced(by: writeIndex), blockRight, firstCount * MemoryLayout<Float>.size)
+        if firstCount < blockSize {
+            let remainder = blockSize - firstCount
+            memcpy(fifoLeft, blockLeft.advanced(by: firstCount), remainder * MemoryLayout<Float>.size)
+            memcpy(fifoRight, blockRight.advanced(by: firstCount), remainder * MemoryLayout<Float>.size)
         }
+        fifoCount += blockSize
     }
 
     private func drain(
@@ -176,16 +183,25 @@ nonisolated final class RealtimeAudioProcessor {
         rightOutput: UnsafeMutablePointer<Float>,
         frameCount: Int
     ) {
-        for index in 0..<frameCount {
-            if fifoCount > 0 {
-                leftOutput[index] = fifoLeft[fifoReadIndex]
-                rightOutput[index] = fifoRight[fifoReadIndex]
-                fifoReadIndex = (fifoReadIndex + 1) % fifoCapacity
-                fifoCount -= 1
-            } else {
-                leftOutput[index] = 0
-                rightOutput[index] = 0
+        let available = min(fifoCount, frameCount)
+        if available > 0 {
+            let firstCount = min(available, fifoCapacity - fifoReadIndex)
+            memcpy(leftOutput, fifoLeft.advanced(by: fifoReadIndex), firstCount * MemoryLayout<Float>.size)
+            memcpy(rightOutput, fifoRight.advanced(by: fifoReadIndex), firstCount * MemoryLayout<Float>.size)
+            if firstCount < available {
+                let remainder = available - firstCount
+                memcpy(leftOutput.advanced(by: firstCount), fifoLeft, remainder * MemoryLayout<Float>.size)
+                memcpy(rightOutput.advanced(by: firstCount), fifoRight, remainder * MemoryLayout<Float>.size)
             }
+            fifoReadIndex = (fifoReadIndex + available) % fifoCapacity
+            fifoCount -= available
+        }
+
+        // Underflow is deliberate: silence until a full DSP block exists.
+        if available < frameCount {
+            let missing = frameCount - available
+            memset(leftOutput.advanced(by: available), 0, missing * MemoryLayout<Float>.size)
+            memset(rightOutput.advanced(by: available), 0, missing * MemoryLayout<Float>.size)
         }
     }
 }

@@ -5,6 +5,7 @@
 //  Manages HRIR presets and multi-channel convolution processing
 //
 
+import Accelerate
 import Foundation
 import Combine
 
@@ -83,8 +84,7 @@ final class ActivationCancellationToken {
 /// Renders a single virtual speaker to binaural output
 nonisolated struct VirtualSpeakerRenderer {
     let speaker: VirtualSpeaker
-    let convolverLeftEar: ConvolutionEngine
-    let convolverRightEar: ConvolutionEngine
+    let convolver: StereoConvolutionEngine
 }
 
 /// Manages HRIR presets and multi-channel convolution processing
@@ -695,6 +695,9 @@ class HRIRManager: ObservableObject {
         activationCancellationToken = cancellationToken
         activationCompletion = completion
 
+        let log2n = vDSP_Length(log2(Double(blockSize * 2)))
+        let sharedFFTSetup = FFTSetupManager.shared.getSetup(log2n: log2n)
+
         let task = DispatchWorkItem { [weak self] in
             do {
                 let wavData = try WAVLoader.load(from: preset.fileURL)
@@ -753,17 +756,18 @@ class HRIRManager: ObservableObject {
                         resampledRight = rightEarIR
                     }
                     
-                    // Create convolution engines off the render thread.
-                    guard let leftEngine = ConvolutionEngine(hrirSamples: resampledLeft, blockSize: blockSize),
-                          let rightEngine = ConvolutionEngine(hrirSamples: resampledRight, blockSize: blockSize) else {
+                    // Create convolution engines off the render thread. Both ears
+                    // share one input FFT, one FDL, and one cached FFT setup.
+                    guard let engine = StereoConvolutionEngine(
+                        leftEarHRIR: resampledLeft,
+                        rightEarHRIR: resampledRight,
+                        blockSize: blockSize,
+                        sharedFFTSetup: sharedFFTSetup
+                    ) else {
                         throw HRIRError.convolutionSetupFailed("Failed to create engines for \(speaker.displayName)")
                     }
-                    
-                    let renderer = VirtualSpeakerRenderer(
-                        speaker: speaker,
-                        convolverLeftEar: leftEngine,
-                        convolverRightEar: rightEngine
-                    )
+
+                    let renderer = VirtualSpeakerRenderer(speaker: speaker, convolver: engine)
                     
                     newRenderers.append(renderer)
                 }
