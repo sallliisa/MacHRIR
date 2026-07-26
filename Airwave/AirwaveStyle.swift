@@ -9,7 +9,7 @@ enum AirwavePalette {
     static let hover = Color.white.opacity(0.08)
 }
 
-enum AirwaveResourceLinks {
+nonisolated enum AirwaveResourceLinks {
     static let hrir = URL(string: "https://airtable.com/embed/appac4r1cu9UpBNAN/shrpUAbtyZxhDDMjg/tblopH2GznvFipWjq/viwnouWPGDuYEd8Go")!
     static let equalizer = URL(string: "https://autoeq.app/")!
 }
