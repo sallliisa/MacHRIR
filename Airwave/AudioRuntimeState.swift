@@ -10,6 +10,7 @@ nonisolated enum RuntimeHealthIssue: Equatable, Sendable {
         case recovery
         case spatial
         case equalizer
+        case coexistence
     }
 
     case permissionRequired
@@ -20,6 +21,7 @@ nonisolated enum RuntimeHealthIssue: Equatable, Sendable {
     case resourceRecovery(reason: String)
     case spatialPresetFailed(reason: String)
     case equalizerFailed(reason: String)
+    case incompatibleAudioApp(appNames: [String])
 
     var category: Category {
         switch self {
@@ -30,6 +32,7 @@ nonisolated enum RuntimeHealthIssue: Equatable, Sendable {
         case .resourceRecovery: .recovery
         case .spatialPresetFailed: .spatial
         case .equalizerFailed: .equalizer
+        case .incompatibleAudioApp: .coexistence
         }
     }
 }

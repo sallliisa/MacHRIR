@@ -546,6 +546,14 @@ struct RuntimeHealthIssuePresentation: Equatable {
                 actionTitle: "Open Equalizer",
                 action: .openEqualizer
             )
+        case .incompatibleAudioApp(let appNames):
+            Self(
+                title: "Airwave is paused: incompatible audio app running",
+                detail: "\(appNames.joined(separator: ", ")) also captures per-app audio. Running both would silence your Mac, so Airwave has paused its processing.",
+                suggestions: ["Quit \(appNames.first ?? "that app") to resume spatial audio. Airwave restarts automatically."],
+                actionTitle: "Retry",
+                action: .retry
+            )
         }
     }
 }
