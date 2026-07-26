@@ -110,7 +110,7 @@ struct SettingsWindowContent: View {
                 hasPreset: profiles.currentProfile?.hrirPresetID != nil,
                 isReady: onboarding.runtime.isSetupHealthy,
                 onSelect: { step in
-                    onboardingNavigationDirection = onboardingIndex(of: step) > onboardingIndex(of: onboarding.currentStep)
+                    onboardingNavigationDirection = step.index > onboarding.currentStep.index
                         ? .forward
                         : .backward
                     withAnimation(onboardingPageAnimation) {
@@ -190,14 +190,11 @@ struct SettingsWindowContent: View {
         reduceMotion ? .easeOut(duration: 0.16) : AirwaveMotion.pageTransition
     }
 
-    private func onboardingIndex(of step: OnboardingStepV2) -> Int {
-        OnboardingStepV2.allCases.firstIndex(of: step) ?? 0
-    }
 }
 
 struct SettingsView: View {
     var showSetup: () -> Void
-    var page: Binding<SettingsPage> = .constant(.general)
+    var page: Binding<SettingsPage>
     @ObservedObject private var onboarding = OnboardingViewModel.shared
     @ObservedObject private var hrirManager = HRIRManager.shared
     @ObservedObject private var profiles = DeviceProfileManager.shared
@@ -238,7 +235,10 @@ struct SettingsView: View {
             }
 
         }
-        .frame(width: 900, height: 600)
+        .frame(
+            width: SettingsWindowPresenter.contentSize.width,
+            height: SettingsWindowPresenter.contentSize.height
+        )
         .preferredColorScheme(.dark)
     }
 
@@ -411,55 +411,37 @@ struct SettingsView: View {
     private var applicationPage: some View {
         VStack(alignment: .leading, spacing: AirwaveLayout.sectionContentSpacing) {
             VStack(spacing: 0) {
-                HStack(spacing: 10) {
-                    Image(systemName: "play.circle.fill")
-                        .font(.system(size: 13))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 20)
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text("Launch at Login").font(.system(size: 12))
-                        Text("Open Airwave automatically when you log in")
-                            .font(.system(size: 11))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
-                    Spacer()
+                AirwaveSettingsRow(
+                    icon: "play.circle.fill",
+                    title: "Launch at Login",
+                    subtitle: "Open Airwave automatically when you log in"
+                ) {
                     Toggle("", isOn: $launchAtLogin.isEnabled)
                         .labelsHidden()
                         .toggleStyle(.switch)
                 }
-                .padding(.horizontal, AirwaveLayout.rowHorizontalPadding)
-                .padding(.vertical, AirwaveLayout.rowVerticalPadding)
 
                 Divider().padding(.leading, 30)
 
-                HStack(spacing: 10) {
-                    Image(systemName: "menubar.rectangle").font(.system(size: 13)).foregroundStyle(.secondary).frame(width: 20)
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text("Show in Menu Bar").font(.system(size: 12))
-                        Text("Keep Airwave in the macOS menu bar.").font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
-                    }
-                    Spacer()
-                    Toggle("", isOn: menuBarVisibilityBinding).labelsHidden().toggleStyle(.switch)
+                AirwaveSettingsRow(
+                    icon: "menubar.rectangle",
+                    title: "Show in Menu Bar",
+                    subtitle: "Keep Airwave available from the macOS menu bar."
+                ) {
+                    Toggle("", isOn: menuVisibility.visibilityBinding)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
                 }
-                .padding(.horizontal, AirwaveLayout.rowHorizontalPadding)
-                .padding(.vertical, AirwaveLayout.rowVerticalPadding)
 
                 Divider().padding(.leading, 30)
 
-                HStack(spacing: 10) {
-                    Image(systemName: updateIconName)
-                        .font(.system(size: 13))
-                        .foregroundStyle(updateIconColor)
-                        .frame(width: 20)
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text("Software Update").font(.system(size: 12))
-                        Text(updateStatusText)
-                            .font(.system(size: 11))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(2)
-                    }
-                    Spacer()
+                AirwaveSettingsRow(
+                    icon: updateIconName,
+                    title: "Software Update",
+                    subtitle: updateStatusText,
+                    iconColor: updateIconColor,
+                    subtitleLineLimit: 2
+                ) {
                     if case .checking = updateManager.state {
                         ProgressView().controlSize(.small)
                     } else {
@@ -475,8 +457,6 @@ struct SettingsView: View {
                         .disabled(!updateManager.canCheckForUpdates)
                     }
                 }
-                .padding(.horizontal, AirwaveLayout.rowHorizontalPadding)
-                .padding(.vertical, AirwaveLayout.rowVerticalPadding)
 
                 Divider().padding(.leading, 30)
 
@@ -500,40 +480,24 @@ struct SettingsView: View {
         showsWarning: Bool = false,
         action: @escaping () -> Void
     ) -> some View {
-        HStack(spacing: 10) {
-            Image(systemName: icon)
-                .font(.system(size: 12))
-                .foregroundStyle(showsWarning ? Color.orange : Color.secondary)
-                .frame(width: 20)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(title).font(.system(size: 12))
-                Text(subtitle).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
-            }
-            Spacer()
+        AirwaveSettingsRow(
+            icon: icon,
+            title: title,
+            subtitle: subtitle,
+            showsWarning: showsWarning
+        ) {
             Button(buttonTitle, action: action)
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
                 .fixedSize()
                 .frame(width: 180, alignment: .trailing)
         }
-        .padding(.horizontal, AirwaveLayout.rowHorizontalPadding)
-        .padding(.vertical, AirwaveLayout.rowVerticalPadding)
-        .background(showsWarning ? Color.orange.opacity(0.10) : Color.clear)
     }
 
     private var onboardingNeedsAttention: Bool {
         onboarding.needsSetupAttention
     }
 
-    private var menuBarVisibilityBinding: Binding<Bool> {
-        Binding(
-            get: { menuVisibility.isVisible },
-            set: { value in
-                guard value != menuVisibility.isVisible else { return }
-                DispatchQueue.main.async { menuVisibility.setVisible(value) }
-            }
-        )
-    }
 
     private var updateStatusText: String {
         switch updateManager.state {

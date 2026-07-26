@@ -19,7 +19,7 @@ struct AirwaveApp: App {
     }
 
     var body: some Scene {
-        MenuBarExtra(isInserted: menuBarInsertionBinding) {
+        MenuBarExtra(isInserted: menuVisibility.visibilityBinding) {
             AirwaveMenuView()
                 .environmentObject(viewModel)
         } label: {
@@ -28,13 +28,4 @@ struct AirwaveApp: App {
         .menuBarExtraStyle(.window)
     }
 
-    private var menuBarInsertionBinding: Binding<Bool> {
-        Binding(
-            get: { menuVisibility.isVisible },
-            set: { value in
-                guard value != menuVisibility.isVisible else { return }
-                DispatchQueue.main.async { menuVisibility.setVisible(value) }
-            }
-        )
-    }
 }

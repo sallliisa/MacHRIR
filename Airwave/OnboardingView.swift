@@ -52,9 +52,7 @@ struct OnboardingView: View {
         }
     }
 
-    private var currentPageNumber: Int {
-        (OnboardingStepV2.allCases.firstIndex(of: viewModel.currentStep) ?? 0) + 1
-    }
+    private var currentPageNumber: Int { viewModel.currentStep.pageNumber }
 
     private var pageTransition: AnyTransition {
         reduceMotion ? .opacity : .airwaveBlurScaleReveal
@@ -66,7 +64,7 @@ struct OnboardingView: View {
 
     private func navigate(to step: OnboardingStepV2) {
         guard step != viewModel.currentStep else { return }
-        navigationDirection = index(of: step) > index(of: viewModel.currentStep) ? .forward : .backward
+        navigationDirection = step.index > viewModel.currentStep.index ? .forward : .backward
         withAnimation(pageAnimation) { viewModel.selectStep(step) }
     }
 
@@ -80,9 +78,6 @@ struct OnboardingView: View {
         withAnimation(pageAnimation) { viewModel.goBack() }
     }
 
-    private func index(of step: OnboardingStepV2) -> Int {
-        OnboardingStepV2.allCases.firstIndex(of: step) ?? 0
-    }
 
     private var stepHeader: some View {
         VStack(alignment: .leading, spacing: 7) {
@@ -275,7 +270,7 @@ struct OnboardingView: View {
                 VStack(spacing: 0) {
                     applicationToggleRow(icon: "play.circle.fill", title: "Launch at Login", subtitle: "Start Airwave automatically when you log in", isOn: $launchAtLogin.isEnabled)
                     Divider().padding(.leading, 42)
-                    applicationToggleRow(icon: "menubar.rectangle", title: "Show in Menu Bar", subtitle: "Keep Airwave available from the macOS menu bar.", isOn: menuBarVisibilityBinding)
+                    applicationToggleRow(icon: "menubar.rectangle", title: "Show in Menu Bar", subtitle: "Keep Airwave available from the macOS menu bar.", isOn: menuVisibility.visibilityBinding)
                 }
                 .background(AirwavePalette.raised, in: RoundedRectangle(cornerRadius: AirwaveLayout.cardCornerRadius))
             }
@@ -318,29 +313,17 @@ struct OnboardingView: View {
         }
     }
 
-    private func applicationToggleRow(icon: String, title: String, subtitle: String, isOn: Binding<Bool>) -> some View {
-        HStack(spacing: 10) {
-            Image(systemName: icon).foregroundStyle(.secondary).frame(width: 24)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title).fontWeight(.medium)
-                Text(subtitle).font(.callout).foregroundStyle(.secondary)
-            }
-            Spacer()
+    private func applicationToggleRow(
+        icon: String,
+        title: String,
+        subtitle: String,
+        isOn: Binding<Bool>
+    ) -> some View {
+        AirwaveSettingsRow(icon: icon, title: title, subtitle: subtitle) {
             Toggle("", isOn: isOn).labelsHidden().toggleStyle(.switch)
         }
-        .padding(.horizontal, AirwaveLayout.rowHorizontalPadding)
-        .padding(.vertical, AirwaveLayout.rowVerticalPadding)
     }
 
-    private var menuBarVisibilityBinding: Binding<Bool> {
-        Binding(
-            get: { menuVisibility.isVisible },
-            set: { value in
-                guard value != menuVisibility.isVisible else { return }
-                DispatchQueue.main.async { menuVisibility.setVisible(value) }
-            }
-        )
-    }
 
     private var footer: some View {
         let isCompletion = viewModel.currentStep == .liveHealth

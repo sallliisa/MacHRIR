@@ -74,6 +74,25 @@ struct AirwaveEqualHeightColumnsLayout: Layout {
     }
 }
 
+/// Airwave mark plus wordmark. One definition for the menu header and top bar.
+struct AirwaveBrandHeader: View {
+    var markSize: CGFloat = 24
+    var titleFont: Font = .headline
+
+    var body: some View {
+        HStack(spacing: markSize > 16 ? 12 : 8) {
+            Image("AirwaveMark")
+                .renderingMode(.template)
+                .resizable()
+                .scaledToFit()
+                .foregroundStyle(.primary)
+                .frame(width: markSize, height: markSize)
+                .accessibilityLabel("Airwave")
+            Text("Airwave").font(titleFont)
+        }
+    }
+}
+
 struct AirwaveTopBar<Center: View, Trailing: View>: View {
     @ViewBuilder let center: () -> Center
     @ViewBuilder let trailing: () -> Trailing
@@ -81,14 +100,7 @@ struct AirwaveTopBar<Center: View, Trailing: View>: View {
     var body: some View {
         ZStack {
             HStack(spacing: 12) {
-                Image("AirwaveMark")
-                    .renderingMode(.template)
-                    .resizable()
-                    .scaledToFit()
-                    .foregroundStyle(.primary)
-                    .frame(width: 24, height: 24)
-                    .accessibilityLabel("Airwave")
-                Text("Airwave").font(.headline)
+                AirwaveBrandHeader()
                 Spacer(minLength: 12)
                 trailing()
             }
