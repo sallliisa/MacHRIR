@@ -346,7 +346,7 @@ final class ProductSurfaceTests: XCTestCase {
 
     func testSettingsSurfaceIncludesResourceLinksPickerLabelsIconsAndHitTargets() throws {
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
-        let style = try String(contentsOf: root.appendingPathComponent("Airwave/AirwaveStyle.swift"), encoding: .utf8)
+        let style = try String(contentsOf: root.appendingPathComponent("Airwave/AirwaveTheme.swift"), encoding: .utf8)
         let settings = try String(contentsOf: root.appendingPathComponent("Airwave/SettingsView.swift"), encoding: .utf8)
         let equalizer = try String(contentsOf: root.appendingPathComponent("Airwave/EqualizerSettingsView.swift"), encoding: .utf8)
         // Both pickers share one library component; its chrome lives there.
@@ -427,7 +427,7 @@ final class ProductSurfaceTests: XCTestCase {
             encoding: .utf8
         )
         let hrir = try String(
-            contentsOf: root.appendingPathComponent("Airwave/AirwaveStyle.swift"),
+            contentsOf: root.appendingPathComponent("Airwave/HRIRPickerView.swift"),
             encoding: .utf8
         )
         let equalizer = try String(

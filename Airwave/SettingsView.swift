@@ -28,6 +28,10 @@ struct SettingsWindowContent: View {
     @State private var onboardingNavigationDirection: OnboardingNavigationDirection = .forward
     @State private var isQuitConfirmationPresented = false
 
+    private var modeTransition: Animation {
+        reduceMotion ? .easeOut(duration: 0.12) : AirwaveMotion.pageTransition
+    }
+
     var body: some View {
         ZStack {
             pageContent
@@ -46,6 +50,8 @@ struct SettingsWindowContent: View {
             }
         }
         .frame(width: SettingsWindowPresenter.contentSize.width, height: SettingsWindowPresenter.contentSize.height)
+        .animation(modeTransition, value: state.mode)
+        .animation(modeTransition, value: state.canReturnToSettings)
         .background(SettingsWindowAccessor())
         .clipped()
         .confirmationDialog(
