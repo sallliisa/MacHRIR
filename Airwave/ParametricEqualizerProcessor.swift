@@ -1,17 +1,6 @@
+import Accelerate
 import Foundation
 import os
-
-nonisolated private struct ParametricEqualizerFilterRuntime {
-    var coefficients: BiquadCoefficients
-    var leftZ1 = 0.0
-    var leftZ2 = 0.0
-    var rightZ1 = 0.0
-    var rightZ2 = 0.0
-
-    init(coefficients: BiquadCoefficients) {
-        self.coefficients = coefficients
-    }
-}
 
 nonisolated final class ParametricEqualizerState {
     static let maximumFilterCount = 64
@@ -19,7 +8,11 @@ nonisolated final class ParametricEqualizerState {
     let filterCount: Int
     let preampLinear: Double
 
-    private let filterStorage: UnsafeMutablePointer<ParametricEqualizerFilterRuntime>
+    /// nil when there are no filters; that state only applies the preamp.
+    private let setup: vDSP_biquadm_Setup?
+    private var preampGain: Float
+    private let inputPointers: UnsafeMutablePointer<UnsafePointer<Float>>
+    private let outputPointers: UnsafeMutablePointer<UnsafeMutablePointer<Float>>
 
     init(
         sampleRate: Double,
@@ -29,28 +22,50 @@ nonisolated final class ParametricEqualizerState {
         self.sampleRate = sampleRate
         self.filterCount = coefficients.count
         self.preampLinear = pow(10, preampDB / 20)
-        self.filterStorage = UnsafeMutablePointer<ParametricEqualizerFilterRuntime>.allocate(
-            capacity: Self.maximumFilterCount
-        )
+        self.preampGain = Float(preampLinear)
+        self.inputPointers = UnsafeMutablePointer<UnsafePointer<Float>>.allocate(capacity: 2)
+        self.outputPointers = UnsafeMutablePointer<UnsafeMutablePointer<Float>>.allocate(capacity: 2)
+
+        guard !coefficients.isEmpty else {
+            self.setup = nil
+            return
+        }
+
+        // Both channels run the same cascade. vDSP lays coefficients out
+        // section-major: all channels of section 0, then section 1, and so on.
+        // The preamp folds into the first section's feed-forward terms, saving a
+        // separate gain pass on the render thread.
+        var flattened = [Double]()
+        flattened.reserveCapacity(2 * coefficients.count * 5)
         for (index, coefficient) in coefficients.enumerated() {
-            filterStorage.advanced(by: index).initialize(
-                to: ParametricEqualizerFilterRuntime(coefficients: coefficient)
+            let gain = index == 0 ? preampLinear : 1
+            for _ in 0..<2 {
+                flattened.append(coefficient.b0 * gain)
+                flattened.append(coefficient.b1 * gain)
+                flattened.append(coefficient.b2 * gain)
+                flattened.append(coefficient.a1)
+                flattened.append(coefficient.a2)
+            }
+        }
+        self.setup = flattened.withUnsafeBufferPointer { pointer in
+            vDSP_biquadm_CreateSetup(
+                pointer.baseAddress!,
+                vDSP_Length(coefficients.count),  // sections
+                2                                 // channels
             )
         }
+        if setup != nil { self.preampGain = 1 }
     }
 
     deinit {
-        filterStorage.deinitialize(count: filterCount)
-        filterStorage.deallocate()
+        if let setup { vDSP_biquadm_DestroySetup(setup) }
+        inputPointers.deallocate()
+        outputPointers.deallocate()
     }
 
     func reset() {
-        for index in 0..<filterCount {
-            filterStorage[index].leftZ1 = 0
-            filterStorage[index].leftZ2 = 0
-            filterStorage[index].rightZ1 = 0
-            filterStorage[index].rightZ2 = 0
-        }
+        guard let setup else { return }
+        vDSP_biquadm_ResetState(setup)
     }
 
     // BEGIN REALTIME CALLBACK
@@ -62,39 +77,37 @@ nonisolated final class ParametricEqualizerState {
         rightOutput: UnsafeMutablePointer<Float>,
         frameCount: Int
     ) {
-        for frame in 0..<frameCount {
-            var left = Double(inputLeft[frame]) * preampLinear
-            var right = Double(inputRight?[frame] ?? inputLeft[frame]) * preampLinear
+        guard frameCount > 0 else { return }
 
-            for filterIndex in 0..<filterCount {
-                let runtime = filterStorage.advanced(by: filterIndex)
-                let coefficients = runtime.pointee.coefficients
-
-                let leftOutputValue = coefficients.b0 * left + runtime.pointee.leftZ1
-                let leftZ1 = coefficients.b1 * left - coefficients.a1 * leftOutputValue + runtime.pointee.leftZ2
-                let leftZ2 = coefficients.b2 * left - coefficients.a2 * leftOutputValue
-                runtime.pointee.leftZ1 = flushSubnormal(leftZ1)
-                runtime.pointee.leftZ2 = flushSubnormal(leftZ2)
-                left = leftOutputValue
-
-                let rightOutputValue = coefficients.b0 * right + runtime.pointee.rightZ1
-                let rightZ1 = coefficients.b1 * right - coefficients.a1 * rightOutputValue + runtime.pointee.rightZ2
-                let rightZ2 = coefficients.b2 * right - coefficients.a2 * rightOutputValue
-                runtime.pointee.rightZ1 = flushSubnormal(rightZ1)
-                runtime.pointee.rightZ2 = flushSubnormal(rightZ2)
-                right = rightOutputValue
-            }
-
-            leftOutput[frame] = Float(left)
-            rightOutput[frame] = Float(right)
+        // Mono input feeds both channels. Copy it into the right output first so
+        // each channel filters in place and channel 0 can never overwrite the
+        // buffer channel 1 still has to read.
+        let right: UnsafePointer<Float>
+        if let inputRight {
+            right = inputRight
+        } else {
+            memcpy(rightOutput, inputLeft, frameCount * MemoryLayout<Float>.size)
+            right = UnsafePointer(rightOutput)
         }
+
+        guard let setup else {
+            vDSP_vsmul(inputLeft, 1, &preampGain, leftOutput, 1, vDSP_Length(frameCount))
+            vDSP_vsmul(right, 1, &preampGain, rightOutput, 1, vDSP_Length(frameCount))
+            return
+        }
+
+        inputPointers.initialize(to: inputLeft)
+        inputPointers.advanced(by: 1).initialize(to: right)
+        outputPointers.initialize(to: leftOutput)
+        outputPointers.advanced(by: 1).initialize(to: rightOutput)
+        vDSP_biquadm(
+            setup,
+            inputPointers, 1,
+            outputPointers, 1,
+            vDSP_Length(frameCount)
+        )
     }
     // END REALTIME CALLBACK
-
-    @inline(__always)
-    private func flushSubnormal(_ value: Double) -> Double {
-        abs(value) < 1e-30 ? 0 : value
-    }
 }
 
 nonisolated enum ParametricEqualizerPreparationError: Error, Equatable, LocalizedError {

@@ -393,6 +393,68 @@ final class ParametricEqualizerProcessorTests: XCTestCase {
         }
     }
 
+    func testCrossfadeToNewTargetStaysContinuousAndSettlesOnTheNewCurve() throws {
+        let sampleRate = 48_000.0
+        let first = EqualizerDefinition(filters: [makeFilter(.peaking, frequency: 1_000, gain: 6, q: 0.707)])
+        let second = EqualizerDefinition(filters: [
+            makeFilter(.peaking, frequency: 3_000, gain: -6, q: 1.1),
+            makeFilter(.lowShelf, frequency: 120, gain: 4, q: 0.7)
+        ])
+
+        let processor = try ParametricEqualizerProcessor(sampleRate: sampleRate)
+        try processor.setTarget(definition: first)
+        var output: [Float] = []
+        // Warm up on the first curve, then swap mid-stream.
+        for _ in 0..<4 { output.append(contentsOf: sine(processor, frames: 256, from: output.count)) }
+        try processor.setTarget(definition: second)
+        for _ in 0..<12 { output.append(contentsOf: sine(processor, frames: 256, from: output.count)) }
+
+        // A 480 Hz sine at 48 kHz steps by at most 0.063 per sample; a hard
+        // state swap mid-fade would jump far beyond that.
+        var maximumDelta: Float = 0
+        for index in 1..<output.count {
+            maximumDelta = max(maximumDelta, abs(output[index] - output[index - 1]))
+        }
+        XCTAssertLessThan(maximumDelta, 0.2)
+
+        let settled = try ParametricEqualizerProcessor(sampleRate: sampleRate)
+        try settled.setTarget(definition: second)
+        var reference: [Float] = []
+        for _ in 0..<16 { reference.append(contentsOf: sine(settled, frames: 256, from: reference.count)) }
+
+        // Both processors see the same input; after the fade they must agree.
+        for index in (output.count - 512)..<output.count {
+            XCTAssertEqual(output[index], reference[index], accuracy: 1e-4)
+        }
+    }
+
+    /// Feeds a continuous 480 Hz sine and returns the left output.
+    private func sine(
+        _ processor: ParametricEqualizerProcessor,
+        frames: Int,
+        from startFrame: Int
+    ) -> [Float] {
+        let input = (0..<frames).map { index in
+            Float(sin(2 * Double.pi * 480 * Double(startFrame + index) / 48_000))
+        }
+        var outputLeft = [Float](repeating: .nan, count: frames)
+        var outputRight = [Float](repeating: .nan, count: frames)
+        input.withUnsafeBufferPointer { inputPointer in
+            outputLeft.withUnsafeMutableBufferPointer { leftPointer in
+                outputRight.withUnsafeMutableBufferPointer { rightPointer in
+                    processor.process(
+                        inputLeft: inputPointer.baseAddress!,
+                        inputRight: inputPointer.baseAddress!,
+                        leftOutput: leftPointer.baseAddress!,
+                        rightOutput: rightPointer.baseAddress!,
+                        frameCount: frames
+                    )
+                }
+            }
+        }
+        return outputLeft
+    }
+
     private func makeFilter(
         _ type: EqualizerFilterType,
         frequency: Double,

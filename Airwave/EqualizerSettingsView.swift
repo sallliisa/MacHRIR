@@ -7,10 +7,12 @@ struct EqualizerSettingsView: View {
     @ObservedObject private var manager: EqualizerManager
     @ObservedObject private var profiles = DeviceProfileManager.shared
     @StateObject private var coordinator: PresetLibraryCoordinator
+    private let actions: MenuBarViewModel
 
     @MainActor
-    init(manager: EqualizerManager) {
+    init(manager: EqualizerManager, actions: MenuBarViewModel) {
         _manager = ObservedObject(wrappedValue: manager)
+        self.actions = actions
         _coordinator = StateObject(wrappedValue: PresetLibraryCoordinator(
             manager: manager,
             configuration: .equalizer
@@ -19,7 +21,7 @@ struct EqualizerSettingsView: View {
 
     @MainActor
     init() {
-        self.init(manager: .shared)
+        self.init(manager: .shared, actions: .shared)
     }
 
     var body: some View {
@@ -52,7 +54,7 @@ struct EqualizerSettingsView: View {
                         sortedByName: false
                     )) { row in
                         Button {
-                            profiles.setEqualizerPresetID(row.preset?.id)
+                            actions.selectEditingEqualizerPreset(row.preset?.id)
                         } label: {
                             HStack(spacing: 8) {
                                 Text(row.name)

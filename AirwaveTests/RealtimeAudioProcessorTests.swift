@@ -7,18 +7,14 @@ final class RealtimeAudioProcessorTests: XCTestCase {
 
     private func makeProcessor(rendererCount: Int = 2) -> RealtimeAudioProcessor {
         let renderers = (0..<rendererCount).map { index in
-            let left = try! XCTUnwrap(ConvolutionEngine(
-                hrirSamples: [Float(index + 1)],
-                blockSize: blockSize
-            ))
-            let right = try! XCTUnwrap(ConvolutionEngine(
-                hrirSamples: [Float(index + 1)],
+            let convolver = try! XCTUnwrap(StereoConvolutionEngine(
+                leftEarHRIR: [Float(index + 1)],
+                rightEarHRIR: [Float(index + 1)],
                 blockSize: blockSize
             ))
             return VirtualSpeakerRenderer(
                 speaker: index == 0 ? .FL : .FR,
-                convolverLeftEar: left,
-                convolverRightEar: right
+                convolver: convolver
             )
         }
         return RealtimeAudioProcessor(
@@ -32,10 +28,11 @@ final class RealtimeAudioProcessorTests: XCTestCase {
         _ processor: RealtimeAudioProcessor,
         size: Int,
         leftValue: Float = 1,
-        rightValue: Float = 2
+        rightValue: Float = 2,
+        input: [Float]? = nil
     ) -> ([Float], [Float]) {
-        let left = [Float](repeating: leftValue, count: size)
-        let right = [Float](repeating: rightValue, count: size)
+        let left = input ?? [Float](repeating: leftValue, count: size)
+        let right = input ?? [Float](repeating: rightValue, count: size)
         var outputLeft = [Float](repeating: .nan, count: size)
         var outputRight = [Float](repeating: .nan, count: size)
         left.withUnsafeBufferPointer { leftPtr in
@@ -94,6 +91,56 @@ final class RealtimeAudioProcessorTests: XCTestCase {
         XCTAssertEqual(underflowRight, underflowLeft)
         let (left, right) = process(processor, size: 512, leftValue: 0.5, rightValue: 0.5)
         XCTAssertEqual(left, right)
+    }
+
+    func testFifoWrapsWithoutLosingOrDuplicatingSamples() {
+        // 4096-frame callbacks wrap the 4608-frame ring on every other call.
+        let processor = makeProcessor(rendererCount: 1)
+        let size = 4096
+        var frame: Float = 0
+        for _ in 0..<6 {
+            let input = (0..<size).map { _ -> Float in frame += 1; return frame / 100_000 }
+            var left = [Float](repeating: .nan, count: size)
+            var right = [Float](repeating: .nan, count: size)
+            input.withUnsafeBufferPointer { inputPtr in
+                left.withUnsafeMutableBufferPointer { leftPtr in
+                    right.withUnsafeMutableBufferPointer { rightPtr in
+                        processor.process(
+                            inputLeft: inputPtr.baseAddress!,
+                            inputRight: inputPtr.baseAddress!,
+                            leftOutput: leftPtr.baseAddress!,
+                            rightOutput: rightPtr.baseAddress!,
+                            frameCount: size
+                        )
+                    }
+                }
+            }
+            // Identity impulse response of gain 1: block-aligned callbacks pass through.
+            for index in 0..<size {
+                XCTAssertEqual(left[index], input[index], accuracy: 1e-5)
+                XCTAssertEqual(right[index], input[index], accuracy: 1e-5)
+            }
+        }
+    }
+
+    func testUnalignedCallbacksNeverReorderOrDuplicateSamplesAcrossWrap() {
+        // Callbacks smaller than blockSize underflow by design, so the stream is
+        // gapped; what must hold across the FIFO wrap is that the samples that do
+        // come out are in input order, each at most once.
+        let processor = makeProcessor(rendererCount: 1)
+        let size = 300
+        var output: [Float] = []
+        var frame: Float = 0
+        for _ in 0..<40 {
+            let chunk = (0..<size).map { _ -> Float in frame += 1; return frame / 100_000 }
+            output.append(contentsOf: process(processor, size: size, input: chunk).0)
+        }
+
+        let delivered = output.filter { $0 != 0 }
+        XCTAssertGreaterThan(delivered.count, 40 * size * 3 / 4)
+        XCTAssertEqual(delivered, delivered.sorted())
+        XCTAssertEqual(Set(delivered).count, delivered.count)
+        XCTAssertTrue(delivered.allSatisfy { $0 <= frame / 100_000 })
     }
 
     func testCanariesRemainUnchanged() {
@@ -171,10 +218,13 @@ final class SpatialRendererCrossfaderTests: XCTestCase {
     private let fadeLength = 1_024
 
     private func makeState(gain: Float) -> HRIRManager.RendererState {
-        let left = ConvolutionEngine(hrirSamples: [gain], blockSize: blockSize)!
-        let right = ConvolutionEngine(hrirSamples: [gain], blockSize: blockSize)!
+        let convolver = StereoConvolutionEngine(
+            leftEarHRIR: [gain],
+            rightEarHRIR: [gain],
+            blockSize: blockSize
+        )!
         return HRIRManager.RendererState(
-            renderers: [VirtualSpeakerRenderer(speaker: .FL, convolverLeftEar: left, convolverRightEar: right)],
+            renderers: [VirtualSpeakerRenderer(speaker: .FL, convolver: convolver)],
             blockSize: blockSize
         )
     }

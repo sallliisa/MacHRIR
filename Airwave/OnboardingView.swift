@@ -52,9 +52,7 @@ struct OnboardingView: View {
         }
     }
 
-    private var currentPageNumber: Int {
-        (OnboardingStepV2.allCases.firstIndex(of: viewModel.currentStep) ?? 0) + 1
-    }
+    private var currentPageNumber: Int { viewModel.currentStep.pageNumber }
 
     private var pageTransition: AnyTransition {
         reduceMotion ? .opacity : .airwaveBlurScaleReveal
@@ -66,7 +64,7 @@ struct OnboardingView: View {
 
     private func navigate(to step: OnboardingStepV2) {
         guard step != viewModel.currentStep else { return }
-        navigationDirection = index(of: step) > index(of: viewModel.currentStep) ? .forward : .backward
+        navigationDirection = step.index > viewModel.currentStep.index ? .forward : .backward
         withAnimation(pageAnimation) { viewModel.selectStep(step) }
     }
 
@@ -80,9 +78,6 @@ struct OnboardingView: View {
         withAnimation(pageAnimation) { viewModel.goBack() }
     }
 
-    private func index(of step: OnboardingStepV2) -> Int {
-        OnboardingStepV2.allCases.firstIndex(of: step) ?? 0
-    }
 
     private var stepHeader: some View {
         VStack(alignment: .leading, spacing: 7) {
@@ -275,7 +270,7 @@ struct OnboardingView: View {
                 VStack(spacing: 0) {
                     applicationToggleRow(icon: "play.circle.fill", title: "Launch at Login", subtitle: "Start Airwave automatically when you log in", isOn: $launchAtLogin.isEnabled)
                     Divider().padding(.leading, 42)
-                    applicationToggleRow(icon: "menubar.rectangle", title: "Show in Menu Bar", subtitle: "Keep Airwave available from the macOS menu bar.", isOn: menuBarVisibilityBinding)
+                    applicationToggleRow(icon: "menubar.rectangle", title: "Show in Menu Bar", subtitle: "Keep Airwave available from the macOS menu bar.", isOn: menuVisibility.visibilityBinding)
                 }
                 .background(AirwavePalette.raised, in: RoundedRectangle(cornerRadius: AirwaveLayout.cardCornerRadius))
             }
@@ -318,29 +313,17 @@ struct OnboardingView: View {
         }
     }
 
-    private func applicationToggleRow(icon: String, title: String, subtitle: String, isOn: Binding<Bool>) -> some View {
-        HStack(spacing: 10) {
-            Image(systemName: icon).foregroundStyle(.secondary).frame(width: 24)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title).fontWeight(.medium)
-                Text(subtitle).font(.callout).foregroundStyle(.secondary)
-            }
-            Spacer()
+    private func applicationToggleRow(
+        icon: String,
+        title: String,
+        subtitle: String,
+        isOn: Binding<Bool>
+    ) -> some View {
+        AirwaveSettingsRow(icon: icon, title: title, subtitle: subtitle) {
             Toggle("", isOn: isOn).labelsHidden().toggleStyle(.switch)
         }
-        .padding(.horizontal, AirwaveLayout.rowHorizontalPadding)
-        .padding(.vertical, AirwaveLayout.rowVerticalPadding)
     }
 
-    private var menuBarVisibilityBinding: Binding<Bool> {
-        Binding(
-            get: { menuVisibility.isVisible },
-            set: { value in
-                guard value != menuVisibility.isVisible else { return }
-                DispatchQueue.main.async { menuVisibility.setVisible(value) }
-            }
-        )
-    }
 
     private var footer: some View {
         let isCompletion = viewModel.currentStep == .liveHealth
@@ -455,105 +438,4 @@ struct OnboardingView: View {
         .background(AirwavePalette.raised, in: RoundedRectangle(cornerRadius: AirwaveLayout.cardCornerRadius))
     }
 
-}
-
-struct OnboardingProgressIndicator: View {
-    let currentStep: OnboardingStepV2
-    let permission: CaptureAccessPresentation
-    let hasCaptureFailureGuidance: Bool
-    let hasPreset: Bool
-    let isReady: Bool
-    let onSelect: (OnboardingStepV2) -> Void
-
-    var body: some View {
-        HStack(spacing: 7) {
-            ForEach(OnboardingStepV2.allCases, id: \.self) { step in
-                OnboardingProgressItem(
-                    step: step,
-                    status: status(for: step),
-                    isCurrent: currentStep == step,
-                    action: { onSelect(step) }
-                )
-            }
-        }
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel("Onboarding progress")
-    }
-
-    private func status(for step: OnboardingStepV2) -> ProgressStatus {
-        switch step {
-        case .welcome: return .complete
-        case .systemAudio:
-            if hasCaptureFailureGuidance { return .attention }
-            switch permission {
-            case .verified: return .complete
-            case .permissionRequired, .failed: return .attention
-            case .checking, .unverified: return .unknown
-            }
-        case .hrirPreset: return .complete
-        case .liveHealth: return isReady ? .complete : .incomplete
-        }
-    }
-}
-
-private enum ProgressStatus {
-    case checking
-    case unknown
-    case incomplete
-    case attention
-    case complete
-}
-
-private struct OnboardingProgressItem: View {
-    let step: OnboardingStepV2
-    let status: ProgressStatus
-    let isCurrent: Bool
-    let action: () -> Void
-
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var isHovering = false
-
-    var body: some View {
-        Button(action: action) {
-            Image(systemName: step.systemImage)
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(iconColor)
-                .frame(width: 32, height: 32)
-                .background { Circle().fill(indicatorBackground) }
-                .contentShape(Circle())
-        }
-        .buttonStyle(AirwavePressedButtonStyle())
-        .help("\(step.title) — \(statusDescription)")
-        .accessibilityLabel(step.title)
-        .accessibilityValue(isCurrent ? "Current page, \(statusDescription)" : statusDescription)
-        .accessibilityAddTraits(isCurrent ? .isSelected : [])
-        .onHover { hovering in
-            withAnimation(reduceMotion ? nil : .easeOut(duration: 0.14)) { isHovering = hovering }
-        }
-    }
-
-    private var iconColor: Color {
-        if isCurrent { return AirwavePalette.canvas }
-        switch status {
-        case .complete: return Color.white
-        case .attention: return Color.orange
-        case .checking, .unknown: return Color.primary
-        case .incomplete: return Color.secondary
-        }
-    }
-
-    private var indicatorBackground: Color {
-        if isCurrent { return Color.primary.opacity(isHovering ? 0.78 : 0.92) }
-        return isHovering ? AirwavePalette.hover : .clear
-    }
-
-    private var statusDescription: String {
-        switch status {
-        case .checking: "Checking"
-        case .unknown: "Not checked"
-        case .incomplete: "Needs setup"
-        case .attention: "Action needed"
-        case .complete: "Complete"
-        }
-    }
 }

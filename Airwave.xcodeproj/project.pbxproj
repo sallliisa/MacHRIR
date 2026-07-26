@@ -7,7 +7,6 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		A01500000000000000000001 /* assets in Resources */ = {isa = PBXBuildFile; fileRef = A01500000000000000000002 /* assets */; };
 		A00100000000000000000011 /* ConvolutionEngineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00100000000000000000002 /* ConvolutionEngineTests.swift */; };
 		A00100000000000000000012 /* RealtimeAudioProcessorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00100000000000000000003 /* RealtimeAudioProcessorTests.swift */; };
 		A00100000000000000000013 /* AudioRuntimeStateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00100000000000000000004 /* AudioRuntimeStateTests.swift */; };
@@ -26,6 +25,7 @@
 		A01200000000000000000001 /* DeviceProfileRuntimeCoordinatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A01200000000000000000002 /* DeviceProfileRuntimeCoordinatorTests.swift */; };
 		A01300000000000000000001 /* DeviceProfileManagementTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A01300000000000000000002 /* DeviceProfileManagementTests.swift */; };
 		A01400000000000000000001 /* OutputDeviceDiscoveryCoordinatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A01400000000000000000002 /* OutputDeviceDiscoveryCoordinatorTests.swift */; };
+		A01500000000000000000001 /* assets in Resources */ = {isa = PBXBuildFile; fileRef = A01500000000000000000002 /* assets */; };
 		A01600000000000000000001 /* TapConflictMonitorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A01600000000000000000002 /* TapConflictMonitorTests.swift */; };
 		A01700000000000000000001 /* PresetLibraryCoordinatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A01700000000000000000002 /* PresetLibraryCoordinatorTests.swift */; };
 /* End PBXBuildFile section */
@@ -41,7 +41,6 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
-		A01500000000000000000002 /* assets */ = {isa = PBXFileReference; lastKnownFileType = folder; path = assets; sourceTree = "<group>"; };
 		25B21E7E2ECCDD9B00FE4B05 /* Airwave.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Airwave.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A00100000000000000000001 /* AirwaveTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = AirwaveTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		A00100000000000000000002 /* ConvolutionEngineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConvolutionEngineTests.swift; sourceTree = "<group>"; };
@@ -61,6 +60,7 @@
 		A01200000000000000000002 /* DeviceProfileRuntimeCoordinatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceProfileRuntimeCoordinatorTests.swift; sourceTree = "<group>"; };
 		A01300000000000000000002 /* DeviceProfileManagementTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceProfileManagementTests.swift; sourceTree = "<group>"; };
 		A01400000000000000000002 /* OutputDeviceDiscoveryCoordinatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OutputDeviceDiscoveryCoordinatorTests.swift; sourceTree = "<group>"; };
+		A01500000000000000000002 /* assets */ = {isa = PBXFileReference; lastKnownFileType = folder; path = assets; sourceTree = "<group>"; };
 		A01600000000000000000002 /* TapConflictMonitorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TapConflictMonitorTests.swift; sourceTree = "<group>"; };
 		A01700000000000000000002 /* PresetLibraryCoordinatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PresetLibraryCoordinatorTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
