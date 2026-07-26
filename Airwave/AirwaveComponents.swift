@@ -264,3 +264,38 @@ struct AirwaveNavigationCard: View {
         .accessibilityHint("Open \(title) settings")
     }
 }
+
+/// One settings/onboarding row: icon, title, subtitle, and whatever control the
+/// caller puts on the trailing edge (toggle, button, progress, value label).
+struct AirwaveSettingsRow<Trailing: View>: View {
+    let icon: String
+    let title: String
+    var subtitle: String?
+    var iconColor: Color = .secondary
+    var subtitleLineLimit: Int = 1
+    var showsWarning = false
+    @ViewBuilder let trailing: () -> Trailing
+
+    var body: some View {
+        HStack(alignment: subtitle == nil ? .top : .center, spacing: 10) {
+            Image(systemName: icon)
+                .font(.system(size: subtitle == nil ? 12 : 13))
+                .foregroundStyle(showsWarning ? Color.orange : iconColor)
+                .frame(width: 20)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title).font(.system(size: 12))
+                if let subtitle {
+                    Text(subtitle)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(subtitleLineLimit)
+                }
+            }
+            Spacer()
+            trailing()
+        }
+        .padding(.horizontal, AirwaveLayout.rowHorizontalPadding)
+        .padding(.vertical, AirwaveLayout.rowVerticalPadding)
+        .background(showsWarning ? Color.orange.opacity(0.10) : Color.clear)
+    }
+}

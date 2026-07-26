@@ -199,7 +199,6 @@ struct SettingsView: View {
     var showSetup: () -> Void
     var page: Binding<SettingsPage> = .constant(.general)
     @ObservedObject private var onboarding = OnboardingViewModel.shared
-    @ObservedObject private var runtime = AudioRuntimeState.shared
     @ObservedObject private var hrirManager = HRIRManager.shared
     @ObservedObject private var profiles = DeviceProfileManager.shared
     @ObservedObject private var launchAtLogin = LaunchAtLoginManager.shared
@@ -225,7 +224,7 @@ struct SettingsView: View {
 
                             #if DEBUG
                             if page.wrappedValue == .general {
-                                debugSection
+                                SettingsDebugHealthSection()
                             }
                             #endif
                         }
@@ -493,69 +492,6 @@ struct SettingsView: View {
         }
     }
 
-    #if DEBUG
-    private var debugSection: some View {
-        VStack(alignment: .leading, spacing: AirwaveLayout.sectionContentSpacing) {
-            AirwaveSectionHeader(
-                title: "Debug Health",
-                subtitle: "Inspect the native process-tap runtime."
-            )
-
-            VStack(spacing: 0) {
-                debugRow("Status", value: runtime.status.title)
-                Divider().padding(.leading, 30)
-                debugRow("Detail", value: runtime.status.detail)
-                Divider().padding(.leading, 30)
-                debugRow("Current Output", value: runtime.currentOutput?.name ?? "Not available")
-                Divider().padding(.leading, 30)
-                debugRow("Sample Rate", value: sampleRate)
-                Divider().padding(.leading, 30)
-                debugRow("Process Tap", value: runtime.status.isProcessing ? "Active" : "Inactive")
-
-                if RuntimeMenuPresentation.make(from: runtime.status).canRetry {
-                    Divider().padding(.leading, 30)
-                    settingsActionRow(
-                        icon: "arrow.clockwise",
-                        title: "Retry Audio Setup",
-                        subtitle: "Ask the runtime to retry immediately",
-                        buttonTitle: "Retry",
-                        action: viewModel.retryAudio
-                    )
-                }
-                if runtime.status == .needsPermission {
-                    Divider().padding(.leading, 30)
-                    settingsActionRow(
-                        icon: "lock.open.fill",
-                        title: "System Audio Capture",
-                        subtitle: "Open the macOS privacy setting for Airwave",
-                        buttonTitle: "Open Settings",
-                        action: viewModel.openSystemAudioRecordingSettings
-                    )
-                }
-            }
-            .background(AirwavePalette.raised, in: RoundedRectangle(cornerRadius: AirwaveLayout.cardCornerRadius))
-        }
-    }
-
-    private func debugRow(_ title: String, value: String) -> some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: "ladybug.fill")
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
-                .frame(width: 20)
-            Text(title).font(.system(size: 12))
-            Spacer()
-            Text(value)
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.trailing)
-                .frame(maxWidth: 360, alignment: .trailing)
-        }
-        .padding(.horizontal, AirwaveLayout.rowHorizontalPadding)
-        .padding(.vertical, AirwaveLayout.rowVerticalPadding)
-    }
-    #endif
-
     private func settingsActionRow(
         icon: String,
         title: String,
@@ -587,11 +523,6 @@ struct SettingsView: View {
 
     private var onboardingNeedsAttention: Bool {
         onboarding.needsSetupAttention
-    }
-
-    private var sampleRate: String {
-        guard let rate = runtime.currentOutput?.nominalSampleRate else { return "—" }
-        return "\(Int(rate.rounded())) Hz"
     }
 
     private var menuBarVisibilityBinding: Binding<Bool> {
